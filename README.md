@@ -110,6 +110,31 @@ c.listen(lambda env: print("got:", env["from"], env.get("body")))
 Standard library only — `git` + Python. Built for GPU boxes and HPC login nodes where you
 can't pip-install much and there's no Docker.
 
+### Autonomous agents (different models, same bus)
+
+A `NodeHost` just moves messages; wrap it in an `AutonomousAgent` with a `Brain` and it
+*reacts*. The brain is the swappable part — that's how heterogeneous models share one bus:
+
+```ts
+import { AutonomousAgent } from "./src/agent/runtime.js";
+import { anthropicBrain } from "./src/agent/brains/anthropic.js";   // claude-opus-4-8
+import { ruleBrain, echoBrain } from "./src/agent/brains/rule.js";  // deterministic, offline
+
+const agent = new AutonomousAgent(host, anthropicBrain({ system: "You triage CI failures." }));
+await agent.start();   // now reacts to every message addressed to it
+```
+
+Ships with a deterministic **rule brain** (no model, used in tests), an **echo brain**,
+and a Claude-backed **Anthropic brain**. From the CLI:
+
+```bash
+npx tsx src/cli.ts agent --as triager --brain anthropic --url ws://host:8787   # needs ANTHROPIC_API_KEY
+npx tsx src/cli.ts agent --as echo --brain echo --url ws://host:8787
+```
+
+Put a `claude-opus-4-8` brain on one box and a Codex/local-model brain (a future `Brain`
+impl) on another, and they collaborate over the same bus.
+
 ## Architecture
 
 ```

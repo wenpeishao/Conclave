@@ -1,9 +1,9 @@
 # STATUS — Conclave v0.1
 
-Built in one session as the first working cut. Everything below is **implemented and
-tested**, not aspirational.
+Built as the first working cut, then extended with a model-driven agent layer.
+Everything below is **implemented and tested**, not aspirational.
 
-## What works (8/8 e2e tests green, typecheck clean)
+## What works (10/10 e2e tests green, typecheck clean)
 
 | Area | State | Test |
 |---|---|---|
@@ -17,7 +17,11 @@ tested**, not aspirational.
 | NodeHost durable state (atomic cursor + WAL, survives restart) | ✅ | relay replay |
 | Claude Code **MCP adapter** (roster/send/inbox tools) | ✅ typecheck + boots | manual |
 | **Python SDK** (zero-dep git-bus) + TS↔Python interop | ✅ | smoke (both directions) |
-| CLI (`up` / `join` / `send`) | ✅ boots | manual |
+| **AutonomousAgent + pluggable Brain** (model-driven agents) | ✅ | `test/agent.test.ts` |
+| Two autonomous agents collaborating (request→compute→response) | ✅ | agent |
+| **Rule brain** (deterministic) + **echo brain** | ✅ | agent |
+| **Anthropic brain** (claude-opus-4-8, adaptive thinking) | ✅ typecheck; ⚠️ live call untested (needs ANTHROPIC_API_KEY) | — |
+| CLI (`up` / `join` / `send` / `agent`) | ✅ boots | manual |
 | api-alignment example | ✅ runs | `npm run example` |
 
 Run it yourself:
@@ -47,8 +51,10 @@ npm install && npm test && npm run example
 
 ## Roadmap
 
-- **P2** — more adapters: Codex/Gemini CLI shim, a `human` web UI, push into Claude Code
-  via Channels (turn the MCP `inbox` from pull into interrupt).
+- **P2** — *(started)* model-driven agents landed (`AutonomousAgent` + `Brain`, with
+  rule/echo/Anthropic brains). Still to do: Codex/Gemini CLI-shim brains, a `human` web
+  UI, push into Claude Code via Channels (turn the MCP `inbox` from pull into interrupt),
+  and a live Anthropic-brain integration test.
 - **P3** — NATS transport (HA push); ack/redelivery on RelayWS for unsent-on-restart.
 - **P4** — ed25519 signing + capability-scoped tokens (who may ask whom to do what).
 - **P5** — loop/cost guards (turn budgets, ping-pong detection, escalate-to-human),

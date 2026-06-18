@@ -1,0 +1,105 @@
+import type { NodeHost } from "../node/host.js";
+import type { Envelope, AgentCard, Kind } from "../core/types.js";
+
+/**
+ * AutonomousAgent — turns a NodeHost into a model-driven actor.
+ *
+ * A NodeHost on its own just moves envelopes. Wrap it in an AutonomousAgent with a
+ * `Brain` and it *reacts*: every inbound message is handed to the brain, which decides
+ * what (if anything) to send back. Swap the brain and you swap the model/policy driving
+ * the agent — a deterministic rule engine, a Claude model, a local model, anything that
+ * implements `Brain`. That is how heterogeneous models share one bus: each is just a
+ * different Brain behind the same NodeHost + Transport.
+ */
+export interface BrainContext {
+  self: AgentCard;
+  message: Envelope; // the inbound envelope that triggered this reaction
+  roster: (AgentCard & { online: boolean })[];
+  history: Envelope[]; // recent inbound + outbound, oldest first
+}
+
+export interface SendAction {
+  type: "send";
+  to: string[] | "*";
+  body: string;
+  subject?: string;
+  kind?: Kind;
+  corr?: string;
+}
+export type Action = SendAction | { type: "noop" };
+
+export interface Brain {
+  react(ctx: BrainContext): Promise<Action[]>;
+}
+
+export interface AgentOpts {
+  maxHistory?: number;
+}
+
+export class AutonomousAgent {
+  private host: NodeHost;
+  private brain: Brain;
+  private history: Envelope[] = [];
+  private maxHistory: number;
+
+  constructor(host: NodeHost, brain: Brain, opts: AgentOpts = {}) {
+    this.host = host;
+    this.brain = brain;
+    this.maxHistory = opts.maxHistory ?? 40;
+  }
+
+  get card(): AgentCard {
+    return this.host.card;
+  }
+
+  async start(): Promise<void> {
+    this.host.onMessage((e) => this.handle(e));
+    await this.host.start();
+  }
+
+  async stop(): Promise<void> {
+    await this.host.stop();
+  }
+
+  private async handle(e: Envelope): Promise<void> {
+    this.record(e);
+    const ctx: BrainContext = {
+      self: this.host.card,
+      message: e,
+      roster: this.host.getRoster(),
+      history: [...this.history],
+    };
+    let actions: Action[];
+    try {
+      actions = await this.brain.react(ctx);
+    } catch (err) {
+      console.error("[conclave] brain error:", err);
+      return;
+    }
+    for (const a of actions) {
+      if (a.type !== "send") continue;
+      try {
+        const sent = await this.host.send(a.to, {
+          body: a.body,
+          subject: a.subject,
+          kind: a.kind,
+          corr: a.corr,
+        });
+        this.record(sent);
+      } catch (err) {
+        console.error("[conclave] agent send failed:", err);
+      }
+    }
+  }
+
+  private record(e: Envelope) {
+    this.history.push(e);
+    if (this.history.length > this.maxHistory) this.history.splice(0, this.history.length - this.maxHistory);
+  }
+}
+
+/** Render an envelope body to a short string for prompts / logs. */
+export function renderBody(body: unknown): string {
+  if (body === undefined || body === null) return "";
+  return typeof body === "string" ? body : JSON.stringify(body);
+}

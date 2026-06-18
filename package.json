@@ -6,11 +6,12 @@
   "license": "MIT",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test --test-force-exit test/core.test.ts test/relay.test.ts test/git.test.ts",
+    "test": "node --import tsx --test --test-force-exit test/core.test.ts test/relay.test.ts test/git.test.ts test/agent.test.ts",
     "example": "tsx examples/api-alignment/demo.ts",
     "conclave": "tsx src/cli.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.69.0",
     "ws": "^8.18.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^4.4.3"

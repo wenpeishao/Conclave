@@ -5,6 +5,8 @@ import * as readline from "node:readline";
 import { RelayServer } from "./relay/server.js";
 import { NodeHost } from "./node/host.js";
 import { buildTransport, type TransportConfig } from "./node/build.js";
+import { AutonomousAgent } from "./agent/runtime.js";
+import { echoBrain } from "./agent/brains/rule.js";
 import type { AgentCard, Envelope } from "./core/types.js";
 
 type Args = Record<string, string | boolean>;
@@ -140,6 +142,29 @@ async function cmdSend(a: Args) {
   process.exit(0);
 }
 
+async function cmdAgent(a: Args) {
+  const name = str(a, "as");
+  if (!name) throw new Error("agent requires --as <name>");
+  const card = makeCard(a, name);
+  const host = new NodeHost({ card, transport: buildTransport(transportFromArgs(a, name)), dataDir: dataHome(a) });
+  const brainKind = str(a, "brain", "echo");
+  let brain;
+  if (brainKind === "anthropic") {
+    // Loaded lazily so `conclave agent --brain echo` needs no API key / SDK.
+    const { anthropicBrain } = await import("./agent/brains/anthropic.js");
+    brain = anthropicBrain({ system: str(a, "system") || undefined, model: str(a, "model") || undefined });
+  } else {
+    brain = echoBrain();
+  }
+  const agent = new AutonomousAgent(host, brain);
+  await agent.start();
+  console.log(`[conclave] autonomous agent ${card.id} running with '${brainKind}' brain`);
+  console.log("[conclave] it will react to incoming messages. Ctrl-C to stop.");
+  process.on("SIGINT", () => {
+    void agent.stop().then(() => process.exit(0));
+  });
+}
+
 function help() {
   console.log(`conclave - cross-device agent bus
 
@@ -155,6 +180,10 @@ function help() {
   conclave send  --as <name> --to <agent> [--subject s] [--body text]
                  [--kind message|event|request] (transport flags as above)
         fire one message and exit.
+
+  conclave agent --as <name> [--brain echo|anthropic] [--model <id>] [--system <prompt>]
+        run a model-driven agent that reacts to incoming messages
+        (anthropic brain needs ANTHROPIC_API_KEY). (transport flags as above)
 
 Examples:
   conclave up --port 8787
@@ -172,6 +201,8 @@ async function main() {
       return cmdJoin(args);
     case "send":
       return cmdSend(args);
+    case "agent":
+      return cmdAgent(args);
     default:
       help();
   }
