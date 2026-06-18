@@ -1,5 +1,6 @@
 import type { NodeHost } from "../node/host.js";
 import type { Envelope, AgentCard, Kind } from "../core/types.js";
+import { LoopGuard } from "./loop-guard.js";
 
 /**
  * AutonomousAgent — turns a NodeHost into a model-driven actor.
@@ -34,6 +35,10 @@ export interface Brain {
 
 export interface AgentOpts {
   maxHistory?: number;
+  /** Loop protection. Suppresses runaway brain replies; omit to disable. */
+  guard?: LoopGuard;
+  /** Topic to notify when the guard trips (default topic://human). */
+  escalateTo?: string;
 }
 
 export class AutonomousAgent {
@@ -41,11 +46,16 @@ export class AutonomousAgent {
   private brain: Brain;
   private history: Envelope[] = [];
   private maxHistory: number;
+  private guard?: LoopGuard;
+  private escalateTo: string;
+  private lastEscalateAt = 0;
 
   constructor(host: NodeHost, brain: Brain, opts: AgentOpts = {}) {
     this.host = host;
     this.brain = brain;
     this.maxHistory = opts.maxHistory ?? 40;
+    this.guard = opts.guard;
+    this.escalateTo = opts.escalateTo ?? "topic://human";
   }
 
   get card(): AgentCard {
@@ -78,6 +88,14 @@ export class AutonomousAgent {
     }
     for (const a of actions) {
       if (a.type !== "send") continue;
+      const peer = Array.isArray(a.to) ? (a.to[0] ?? "*") : "*";
+      if (this.guard) {
+        const decision = this.guard.check(peer);
+        if (!decision.ok) {
+          await this.escalate(decision.reason ?? "rate", peer);
+          continue; // suppress the runaway reply
+        }
+      }
       try {
         const sent = await this.host.send(a.to, {
           body: a.body,
@@ -85,10 +103,29 @@ export class AutonomousAgent {
           kind: a.kind,
           corr: a.corr,
         });
+        this.guard?.record(peer);
         this.record(sent);
       } catch (err) {
         console.error("[conclave] agent send failed:", err);
       }
+    }
+  }
+
+  /** Notify a human (once per window) that this agent hit a loop limit. */
+  private async escalate(reason: string, peer: string): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastEscalateAt < 30000) return; // don't spam escalations
+    this.lastEscalateAt = now;
+    console.error(`[conclave] loop guard tripped (${reason}) on ${this.host.card.id} -> ${peer}; reply suppressed`);
+    try {
+      // Sent directly (not through the guard) so escalation itself can't be throttled.
+      await this.host.send([this.escalateTo], {
+        kind: "event",
+        subject: "loop-guard tripped",
+        body: { agent: this.host.card.id, peer, reason },
+      });
+    } catch {
+      /* escalation is best-effort */
     }
   }
 

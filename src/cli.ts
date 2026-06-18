@@ -188,6 +188,22 @@ async function cmdAgent(a: Args) {
   });
 }
 
+async function cmdHuman(a: Args) {
+  const name = str(a, "as", "human");
+  const card = makeCard(a, name);
+  const host = new NodeHost({ card, transport: buildTransport(transportFromArgs(a, name)), dataDir: dataHome(a) });
+  host.subscribe("topic://human"); // receive loop-guard escalations
+  const { HumanServer } = await import("./agent/human-server.js");
+  const port = a["port"] ? Number(a["port"]) : 7070;
+  const server = new HumanServer({ host, port });
+  await server.start();
+  console.log(`[conclave] human UI for ${card.id} at http://localhost:${server.port()}`);
+  console.log("[conclave] open it in a browser; you are now an agent on the bus. Ctrl-C to stop.");
+  process.on("SIGINT", () => {
+    void server.stop().then(() => process.exit(0));
+  });
+}
+
 function help() {
   console.log(`conclave - cross-device agent bus
 
@@ -213,6 +229,10 @@ function help() {
           local      local model via OpenAI-compatible HTTP  --model <name> [--base-url url]
           ollama     Ollama preset (:11434)  --model <name>
           lmstudio   LM Studio preset (:1234)  --model <name>
+
+  conclave human --as <name> [--port 7070] (transport flags as above)
+        run a web UI that puts YOU on the bus as an agent (inbox + send form).
+        Also receives loop-guard escalations from other agents.
         (transport flags as above)
 
 Examples:
@@ -233,6 +253,8 @@ async function main() {
       return cmdSend(args);
     case "agent":
       return cmdAgent(args);
+    case "human":
+      return cmdHuman(args);
     default:
       help();
   }

@@ -144,6 +144,24 @@ a GPU box — they all collaborate over the same bus. Genuinely heterogeneous mo
 protocol. (The CLI-shim passes prompts as a spawn argv element, so prompt text is never
 shell-parsed; the HTTP brain only calls the model for real messages, never heartbeats.)
 
+### Loop protection + a human in the loop
+
+Two model-driven agents can ping-pong forever and burn tokens. Attach a `LoopGuard` and the
+agent suppresses runaway replies (rate limit + same-peer ping-pong detection) and **escalates
+once to a human**:
+
+```ts
+import { LoopGuard } from "./src/agent/loop-guard.js";
+const agent = new AutonomousAgent(host, brain, { guard: new LoopGuard({ maxConsecutivePerPeer: 8 }) });
+```
+
+The human is just another agent. Run the web UI and you're on the bus — reading what agents
+send, replying by hand, and receiving loop-guard escalations:
+
+```bash
+npx tsx src/cli.ts human --as me --url ws://host:8787 --port 7070   # open http://localhost:7070
+```
+
 ## Architecture
 
 ```

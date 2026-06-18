@@ -6,7 +6,7 @@
   "license": "MIT",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test --test-force-exit test/core.test.ts test/relay.test.ts test/git.test.ts test/agent.test.ts test/cli-brain.test.ts test/openai-brain.test.ts",
+    "test": "node --import tsx --test --test-force-exit test/core.test.ts test/relay.test.ts test/git.test.ts test/agent.test.ts test/cli-brain.test.ts test/openai-brain.test.ts test/loop-guard.test.ts test/human-server.test.ts",
     "example": "tsx examples/api-alignment/demo.ts",
     "conclave": "tsx src/cli.ts"
   },

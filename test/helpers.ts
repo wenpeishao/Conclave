@@ -13,10 +13,10 @@ export function card(name: string): AgentCard {
   return { id: `agent://${name}`, name, realtime: "poll" };
 }
 
-/** Poll a predicate until true or timeout — avoids brittle fixed sleeps. */
-export async function until(pred: () => boolean, timeoutMs = 4000, stepMs = 25): Promise<void> {
+/** Poll a (possibly async) predicate until true or timeout — avoids brittle fixed sleeps. */
+export async function until(pred: () => boolean | Promise<boolean>, timeoutMs = 4000, stepMs = 25): Promise<void> {
   const start = Date.now();
-  while (!pred()) {
+  while (!(await pred())) {
     if (Date.now() - start > timeoutMs) throw new Error("until() timed out");
     await wait(stepMs);
   }

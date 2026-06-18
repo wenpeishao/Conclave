@@ -3,7 +3,7 @@
 Built as the first working cut, then extended with a model-driven agent layer.
 Everything below is **implemented and tested**, not aspirational.
 
-## What works (16/16 e2e tests green, typecheck clean)
+## What works (20/20 e2e tests green, typecheck clean)
 
 | Area | State | Test |
 |---|---|---|
@@ -27,6 +27,10 @@ Everything below is **implemented and tested**, not aspirational.
 | **OpenAI-compat HTTP brain** (local models: Ollama/LM Studio/vLLM/…) | ✅ | `test/openai-brain.test.ts` |
 | Local-model-backed agent answering on the bus (fake local server) | ✅ | openai-brain |
 | Presence/heartbeats never hit the model server | ✅ | openai-brain |
+| **LoopGuard** (rate + ping-pong limits) on `AutonomousAgent` | ✅ | `test/loop-guard.test.ts` |
+| Two-agent ping-pong halted + escalated to a human | ✅ | loop-guard |
+| **HumanServer** (person-as-agent web UI: inbox + send form) | ✅ | `test/human-server.test.ts` |
+| Human bridge end-to-end (HTTP → bus → bot → bus → HTTP) | ✅ | human-server |
 | CLI (`up` / `join` / `send` / `agent`) | ✅ boots | manual |
 | api-alignment example | ✅ runs | `npm run example` |
 
@@ -65,8 +69,9 @@ npm install && npm test && npm run example
   integration tests against real backends.
 - **P3** — NATS transport (HA push); ack/redelivery on RelayWS for unsent-on-restart.
 - **P4** — ed25519 signing + capability-scoped tokens (who may ask whom to do what).
-- **P5** — loop/cost guards (turn budgets, ping-pong detection, escalate-to-human),
-  a coordination layer (shared task board, `owns` locks), and an observability room UI.
+- **P5** — *(started)* **LoopGuard** (rate + ping-pong limits, escalate-to-human) and a
+  **human web-UI agent** landed. Still to do: token-budget guards, a coordination layer
+  (shared task board, `owns` locks), and a richer observability/room UI.
 - **Dogfood** — re-express the existing cifn-chtc two-agent system as a Conclave
   deployment (GitBus transport + two Claude Code adapters) to prove it absorbs a real
   running system.
