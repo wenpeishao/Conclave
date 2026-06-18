@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type { Brain, BrainContext, Action } from "../runtime.js";
+import type { Brain, BrainContext, BrainResult } from "../runtime.js";
 import { renderBody } from "../runtime.js";
 
 /**
@@ -37,7 +37,7 @@ export function anthropicBrain(opts: AnthropicBrainOpts = {}): Brain {
   const replyTo = opts.replyTo ?? new Set(["message", "request"]);
 
   return {
-    async react(ctx: BrainContext): Promise<Action[]> {
+    async react(ctx: BrainContext): Promise<BrainResult> {
       const e = ctx.message;
       if (!replyTo.has(e.kind)) return [{ type: "noop" }];
 
@@ -77,17 +77,22 @@ export function anthropicBrain(opts: AnthropicBrainOpts = {}): Brain {
         .join("")
         .trim();
 
-      if (!text || text === "NOOP") return [{ type: "noop" }];
+      const usageTokens = (resp.usage?.input_tokens ?? 0) + (resp.usage?.output_tokens ?? 0);
 
-      return [
-        {
-          type: "send",
-          to: [e.from],
-          body: text,
-          kind: e.kind === "request" ? "response" : "message",
-          corr: e.kind === "request" ? e.id : e.corr,
-        },
-      ];
+      if (!text || text === "NOOP") return { actions: [{ type: "noop" }], usageTokens };
+
+      return {
+        actions: [
+          {
+            type: "send",
+            to: [e.from],
+            body: text,
+            kind: e.kind === "request" ? "response" : "message",
+            corr: e.kind === "request" ? e.id : e.corr,
+          },
+        ],
+        usageTokens,
+      };
     },
   };
 }

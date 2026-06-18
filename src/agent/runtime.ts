@@ -1,6 +1,7 @@
 import type { NodeHost } from "../node/host.js";
 import type { Envelope, AgentCard, Kind } from "../core/types.js";
 import { LoopGuard } from "./loop-guard.js";
+import { TokenBudget, estimateTokens } from "./token-budget.js";
 
 /**
  * AutonomousAgent — turns a NodeHost into a model-driven actor.
@@ -29,15 +30,24 @@ export interface SendAction {
 }
 export type Action = SendAction | { type: "noop" };
 
+/** A brain may return a bare action list, or actions plus the real tokens it spent. */
+export interface BrainReply {
+  actions: Action[];
+  usageTokens?: number;
+}
+export type BrainResult = Action[] | BrainReply;
+
 export interface Brain {
-  react(ctx: BrainContext): Promise<Action[]>;
+  react(ctx: BrainContext): Promise<BrainResult>;
 }
 
 export interface AgentOpts {
   maxHistory?: number;
   /** Loop protection. Suppresses runaway brain replies; omit to disable. */
   guard?: LoopGuard;
-  /** Topic to notify when the guard trips (default topic://human). */
+  /** Token spend cap. Stops invoking the brain once exhausted; omit for unbounded. */
+  budget?: TokenBudget;
+  /** Topic to notify when the guard/budget trips (default topic://human). */
   escalateTo?: string;
 }
 
@@ -47,6 +57,7 @@ export class AutonomousAgent {
   private history: Envelope[] = [];
   private maxHistory: number;
   private guard?: LoopGuard;
+  private budget?: TokenBudget;
   private escalateTo: string;
   private lastEscalateAt = 0;
 
@@ -55,6 +66,7 @@ export class AutonomousAgent {
     this.brain = brain;
     this.maxHistory = opts.maxHistory ?? 40;
     this.guard = opts.guard;
+    this.budget = opts.budget;
     this.escalateTo = opts.escalateTo ?? "topic://human";
   }
 
@@ -73,19 +85,35 @@ export class AutonomousAgent {
 
   private async handle(e: Envelope): Promise<void> {
     this.record(e);
+
+    // Budget gate: once exhausted, stop spending on inference and hand off to a human.
+    if (this.budget && this.budget.exhausted()) {
+      await this.escalate("budget", e.from);
+      return;
+    }
+
     const ctx: BrainContext = {
       self: this.host.card,
       message: e,
       roster: this.host.getRoster(),
       history: [...this.history],
     };
-    let actions: Action[];
+    let result: BrainResult;
     try {
-      actions = await this.brain.react(ctx);
+      result = await this.brain.react(ctx);
     } catch (err) {
       console.error("[conclave] brain error:", err);
       return;
     }
+    const actions = Array.isArray(result) ? result : result.actions;
+    const reportedUsage = Array.isArray(result) ? undefined : result.usageTokens;
+
+    // The brain call cost tokens whether or not we end up sending — charge it now.
+    if (this.budget) {
+      const replyText = actions.map((a) => (a.type === "send" ? a.body : "")).join("");
+      this.budget.charge(reportedUsage ?? estimateTokens(renderBody(e.body), replyText));
+    }
+
     for (const a of actions) {
       if (a.type !== "send") continue;
       const peer = Array.isArray(a.to) ? (a.to[0] ?? "*") : "*";

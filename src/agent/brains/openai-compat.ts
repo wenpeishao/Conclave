@@ -1,4 +1,4 @@
-import type { Brain, BrainContext, Action } from "../runtime.js";
+import type { Brain, BrainContext, BrainResult } from "../runtime.js";
 import { renderBody } from "../runtime.js";
 
 /**
@@ -46,7 +46,7 @@ export function openaiCompatBrain(opts: OpenAICompatBrainOpts): Brain {
   const buildUser = opts.buildUserPrompt ?? defaultUserPrompt;
 
   return {
-    async react(ctx: BrainContext): Promise<Action[]> {
+    async react(ctx: BrainContext): Promise<BrainResult> {
       const e = ctx.message;
       if (!replyTo.has(e.kind)) return [{ type: "noop" }];
 
@@ -56,6 +56,7 @@ export function openaiCompatBrain(opts: OpenAICompatBrainOpts): Brain {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 120000);
       let content: string;
+      let usageTokens: number | undefined;
       try {
         const headers: Record<string, string> = { "content-type": "application/json" };
         if (opts.apiKey) headers["authorization"] = `Bearer ${opts.apiKey}`;
@@ -78,8 +79,12 @@ export function openaiCompatBrain(opts: OpenAICompatBrainOpts): Brain {
           console.error(`[conclave] openai-compat brain HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
           return [{ type: "noop" }];
         }
-        const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+        const data = (await res.json()) as {
+          choices?: { message?: { content?: string } }[];
+          usage?: { total_tokens?: number };
+        };
         content = (data.choices?.[0]?.message?.content ?? "").trim();
+        usageTokens = data.usage?.total_tokens;
       } catch (err) {
         console.error("[conclave] openai-compat brain failed:", (err as Error).message);
         return [{ type: "noop" }];
@@ -87,16 +92,19 @@ export function openaiCompatBrain(opts: OpenAICompatBrainOpts): Brain {
         clearTimeout(timer);
       }
 
-      if (!content || content === "NOOP") return [{ type: "noop" }];
-      return [
-        {
-          type: "send",
-          to: [e.from],
-          body: content,
-          kind: e.kind === "request" ? "response" : "message",
-          corr: e.kind === "request" ? e.id : e.corr,
-        },
-      ];
+      if (!content || content === "NOOP") return { actions: [{ type: "noop" }], usageTokens };
+      return {
+        actions: [
+          {
+            type: "send",
+            to: [e.from],
+            body: content,
+            kind: e.kind === "request" ? "response" : "message",
+            corr: e.kind === "request" ? e.id : e.corr,
+          },
+        ],
+        usageTokens,
+      };
     },
   };
 }

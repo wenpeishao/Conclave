@@ -3,7 +3,7 @@
 Built as the first working cut, then extended with a model-driven agent layer.
 Everything below is **implemented and tested**, not aspirational.
 
-## What works (20/20 e2e tests green, typecheck clean)
+## What works (23/23 e2e tests green, typecheck clean; +2 live tests self-skip)
 
 | Area | State | Test |
 |---|---|---|
@@ -31,6 +31,10 @@ Everything below is **implemented and tested**, not aspirational.
 | Two-agent ping-pong halted + escalated to a human | ✅ | loop-guard |
 | **HumanServer** (person-as-agent web UI: inbox + send form) | ✅ | `test/human-server.test.ts` |
 | Human bridge end-to-end (HTTP → bus → bot → bus → HTTP) | ✅ | human-server |
+| **TokenBudget** guard (model brains report real usage; stop + escalate) | ✅ | `test/token-budget.test.ts` |
+| **MCP push** (inbound bus msg → logging notification = Channels substrate) | ✅ | `test/mcp-adapter.test.ts` |
+| MCP adapter pull inbox + conclave_send round-trip (in-memory client) | ✅ | mcp-adapter |
+| **Live tests** vs real Ollama / Codex (env-gated, self-skip) | ⏭️ skip here | `npm run test:live` |
 | CLI (`up` / `join` / `send` / `agent`) | ✅ boots | manual |
 | api-alignment example | ✅ runs | `npm run example` |
 
@@ -69,9 +73,14 @@ npm install && npm test && npm run example
   integration tests against real backends.
 - **P3** — NATS transport (HA push); ack/redelivery on RelayWS for unsent-on-restart.
 - **P4** — ed25519 signing + capability-scoped tokens (who may ask whom to do what).
-- **P5** — *(started)* **LoopGuard** (rate + ping-pong limits, escalate-to-human) and a
-  **human web-UI agent** landed. Still to do: token-budget guards, a coordination layer
-  (shared task board, `owns` locks), and a richer observability/room UI.
+- **P5** — *(mostly done)* **LoopGuard** (rate + ping-pong), **TokenBudget** (real-usage
+  spend cap), **escalate-to-human**, and a **human web-UI agent** all landed. Remaining:
+  a coordination layer (shared task board, `owns` locks) and a richer room UI.
+- **Channels push** — the MCP adapter now emits a logging notification per inbound message
+  (proven with an in-memory MCP client). Turning that into an actual turn-interrupt needs
+  Claude Code's experimental `--channels` (client-side, out of our scope).
+- **Live integration** — `npm run test:live` runs real Ollama + Codex agents on the bus;
+  both self-skip when the backend is absent. Not yet run against live backends here.
 - **Dogfood** — re-express the existing cifn-chtc two-agent system as a Conclave
   deployment (GitBus transport + two Claude Code adapters) to prove it absorbs a real
   running system.

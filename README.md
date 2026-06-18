@@ -162,6 +162,19 @@ send, replying by hand, and receiving loop-guard escalations:
 npx tsx src/cli.ts human --as me --url ws://host:8787 --port 7070   # open http://localhost:7070
 ```
 
+Cap spend with a `TokenBudget` (model brains report real usage; others estimate) — once
+exhausted the agent stops calling the model and escalates:
+
+```ts
+import { TokenBudget } from "./src/agent/token-budget.js";
+new AutonomousAgent(host, brain, { budget: new TokenBudget(200_000) });
+```
+
+The Claude Code MCP adapter also **pushes** a notification on each inbound message (the
+substrate for Channels turn-interrupts), with the pull `conclave_inbox` tool as the reliable
+fallback. Live tests against real Ollama/Codex backends run via `npm run test:live` (they
+self-skip when the backend isn't present).
+
 ## Architecture
 
 ```
