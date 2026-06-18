@@ -129,14 +129,20 @@ a Claude-backed **Anthropic brain**, and a **CLI-shim brain** that drives *any* 
 agent — with **`codex`** and **`gemini`** presets. From the CLI:
 
 ```bash
-npx tsx src/cli.ts agent --as triager --brain anthropic --url ws://host:8787   # Claude (ANTHROPIC_API_KEY)
-npx tsx src/cli.ts agent --as coder   --brain codex     --url ws://host:8787   # OpenAI Codex CLI
+npx tsx src/cli.ts agent --as triager --brain anthropic --url ws://host:8787       # Claude (ANTHROPIC_API_KEY)
+npx tsx src/cli.ts agent --as coder   --brain codex     --url ws://host:8787       # OpenAI Codex CLI
+npx tsx src/cli.ts agent --as local   --brain ollama --model llama3.1 --url ws://host:8787  # local model
 npx tsx src/cli.ts agent --as custom  --brain cli --command ./my-agent --prompt-via stdin
 ```
 
-Put a `claude-opus-4-8` brain on one box and a `codex` brain on another, and they
-collaborate over the same bus — genuinely heterogeneous models, one protocol. (The CLI-shim
-passes prompts as a spawn argv element, so arbitrary prompt text is never shell-parsed.)
+**Local models work** via the OpenAI-compatible HTTP brain — point it at Ollama
+(`:11434/v1`), LM Studio (`:1234/v1`), vLLM, llama.cpp's server, or any `/v1/chat/completions`
+endpoint (`--brain local --model <name> --base-url <url>`). It talks plain HTTP, no SDK.
+
+Put a `claude-opus-4-8` brain on one box, a `codex` brain on another, and an Ollama model on
+a GPU box — they all collaborate over the same bus. Genuinely heterogeneous models, one
+protocol. (The CLI-shim passes prompts as a spawn argv element, so prompt text is never
+shell-parsed; the HTTP brain only calls the model for real messages, never heartbeats.)
 
 ## Architecture
 

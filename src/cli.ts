@@ -153,6 +153,14 @@ async function cmdAgent(a: Args) {
     // Loaded lazily so `conclave agent --brain echo` needs no API key / SDK.
     const { anthropicBrain } = await import("./agent/brains/anthropic.js");
     brain = anthropicBrain({ system: str(a, "system") || undefined, model: str(a, "model") || undefined });
+  } else if (brainKind === "local" || brainKind === "openai" || brainKind === "ollama" || brainKind === "lmstudio") {
+    const { openaiCompatBrain, ollamaBrain, lmStudioBrain } = await import("./agent/brains/openai-compat.js");
+    const model = str(a, "model");
+    if (!model) throw new Error(`--brain ${brainKind} requires --model <name>`);
+    const apiKey = str(a, "api-key") || process.env.OPENAI_API_KEY;
+    if (brainKind === "ollama") brain = ollamaBrain(model, { apiKey });
+    else if (brainKind === "lmstudio") brain = lmStudioBrain(model, { apiKey });
+    else brain = openaiCompatBrain({ baseUrl: str(a, "base-url") || undefined, model, apiKey });
   } else if (brainKind === "codex" || brainKind === "gemini" || brainKind === "cli") {
     const { cliBrain, codexBrain, geminiBrain } = await import("./agent/brains/cli.js");
     const shell = a["shell"] === true;
@@ -202,6 +210,9 @@ function help() {
           codex      OpenAI Codex CLI (codex exec)     [--shell on Windows]
           gemini     Google Gemini CLI (gemini -p)
           cli        any subprocess  --command <bin> [--cmd-args a,b] [--prompt-via arg|stdin]
+          local      local model via OpenAI-compatible HTTP  --model <name> [--base-url url]
+          ollama     Ollama preset (:11434)  --model <name>
+          lmstudio   LM Studio preset (:1234)  --model <name>
         (transport flags as above)
 
 Examples:

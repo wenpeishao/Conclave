@@ -3,7 +3,7 @@
 Built as the first working cut, then extended with a model-driven agent layer.
 Everything below is **implemented and tested**, not aspirational.
 
-## What works (14/14 e2e tests green, typecheck clean)
+## What works (16/16 e2e tests green, typecheck clean)
 
 | Area | State | Test |
 |---|---|---|
@@ -24,6 +24,9 @@ Everything below is **implemented and tested**, not aspirational.
 | **CLI-shim brain** (generic subprocess) + **codex/gemini presets** | ✅ | `test/cli-brain.test.ts` |
 | Subprocess-driven agent answering on the bus (arg + stdin modes) | ✅ | cli-brain |
 | CLI-shim failure → no-op (missing binary doesn't crash) | ✅ | cli-brain |
+| **OpenAI-compat HTTP brain** (local models: Ollama/LM Studio/vLLM/…) | ✅ | `test/openai-brain.test.ts` |
+| Local-model-backed agent answering on the bus (fake local server) | ✅ | openai-brain |
+| Presence/heartbeats never hit the model server | ✅ | openai-brain |
 | CLI (`up` / `join` / `send` / `agent`) | ✅ boots | manual |
 | api-alignment example | ✅ runs | `npm run example` |
 
@@ -55,10 +58,11 @@ npm install && npm test && npm run example
 ## Roadmap
 
 - **P2** — *(mostly done)* model-driven agents (`AutonomousAgent` + `Brain`): rule, echo,
-  Anthropic (Claude), and the **CLI-shim brain** (generic subprocess + codex/gemini presets)
-  all landed — a Claude agent and a Codex agent can now collaborate on one bus. Still to do:
-  a `human` web-UI brain, push into Claude Code via Channels (MCP `inbox` pull→interrupt),
-  and live integration tests for the Anthropic + Codex brains against real backends.
+  Anthropic (Claude), **CLI-shim** (subprocess + codex/gemini presets), and **OpenAI-compat
+  HTTP** (local models — Ollama/LM Studio/vLLM, also hosted OpenAI) all landed. Claude +
+  Codex + a local Ollama model can all collaborate on one bus. Still to do: a `human` web-UI
+  brain, push into Claude Code via Channels (MCP `inbox` pull→interrupt), and live
+  integration tests against real backends.
 - **P3** — NATS transport (HA push); ack/redelivery on RelayWS for unsent-on-restart.
 - **P4** — ed25519 signing + capability-scoped tokens (who may ask whom to do what).
 - **P5** — loop/cost guards (turn budgets, ping-pong detection, escalate-to-human),
