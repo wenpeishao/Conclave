@@ -153,6 +153,21 @@ async function cmdAgent(a: Args) {
     // Loaded lazily so `conclave agent --brain echo` needs no API key / SDK.
     const { anthropicBrain } = await import("./agent/brains/anthropic.js");
     brain = anthropicBrain({ system: str(a, "system") || undefined, model: str(a, "model") || undefined });
+  } else if (brainKind === "codex" || brainKind === "gemini" || brainKind === "cli") {
+    const { cliBrain, codexBrain, geminiBrain } = await import("./agent/brains/cli.js");
+    const shell = a["shell"] === true;
+    if (brainKind === "codex") brain = codexBrain({ shell });
+    else if (brainKind === "gemini") brain = geminiBrain({ shell });
+    else {
+      const command = str(a, "command");
+      if (!command) throw new Error("--brain cli requires --command <bin>");
+      brain = cliBrain({
+        command,
+        args: str(a, "cmd-args") ? str(a, "cmd-args").split(",") : [],
+        promptVia: str(a, "prompt-via", "arg") === "stdin" ? "stdin" : "arg",
+        shell,
+      });
+    }
   } else {
     brain = echoBrain();
   }
@@ -181,9 +196,13 @@ function help() {
                  [--kind message|event|request] (transport flags as above)
         fire one message and exit.
 
-  conclave agent --as <name> [--brain echo|anthropic] [--model <id>] [--system <prompt>]
-        run a model-driven agent that reacts to incoming messages
-        (anthropic brain needs ANTHROPIC_API_KEY). (transport flags as above)
+  conclave agent --as <name> [--brain echo|anthropic|codex|gemini|cli]
+        run a model-driven agent that reacts to incoming messages. Brains:
+          anthropic  Claude (needs ANTHROPIC_API_KEY) [--model <id>] [--system <p>]
+          codex      OpenAI Codex CLI (codex exec)     [--shell on Windows]
+          gemini     Google Gemini CLI (gemini -p)
+          cli        any subprocess  --command <bin> [--cmd-args a,b] [--prompt-via arg|stdin]
+        (transport flags as above)
 
 Examples:
   conclave up --port 8787

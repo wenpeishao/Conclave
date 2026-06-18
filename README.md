@@ -124,16 +124,19 @@ const agent = new AutonomousAgent(host, anthropicBrain({ system: "You triage CI 
 await agent.start();   // now reacts to every message addressed to it
 ```
 
-Ships with a deterministic **rule brain** (no model, used in tests), an **echo brain**,
-and a Claude-backed **Anthropic brain**. From the CLI:
+Ships with: a deterministic **rule brain** (no model, used in tests), an **echo brain**,
+a Claude-backed **Anthropic brain**, and a **CLI-shim brain** that drives *any* subprocess
+agent — with **`codex`** and **`gemini`** presets. From the CLI:
 
 ```bash
-npx tsx src/cli.ts agent --as triager --brain anthropic --url ws://host:8787   # needs ANTHROPIC_API_KEY
-npx tsx src/cli.ts agent --as echo --brain echo --url ws://host:8787
+npx tsx src/cli.ts agent --as triager --brain anthropic --url ws://host:8787   # Claude (ANTHROPIC_API_KEY)
+npx tsx src/cli.ts agent --as coder   --brain codex     --url ws://host:8787   # OpenAI Codex CLI
+npx tsx src/cli.ts agent --as custom  --brain cli --command ./my-agent --prompt-via stdin
 ```
 
-Put a `claude-opus-4-8` brain on one box and a Codex/local-model brain (a future `Brain`
-impl) on another, and they collaborate over the same bus.
+Put a `claude-opus-4-8` brain on one box and a `codex` brain on another, and they
+collaborate over the same bus — genuinely heterogeneous models, one protocol. (The CLI-shim
+passes prompts as a spawn argv element, so arbitrary prompt text is never shell-parsed.)
 
 ## Architecture
 
