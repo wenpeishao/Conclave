@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/wenpeishao/conclave/spec/envelope.schema.json",
+  "title": "Conclave Envelope v1",
+  "type": "object",
+  "required": ["v", "id", "ts", "from", "to", "kind"],
+  "additionalProperties": false,
+  "properties": {
+    "v": { "const": "1", "description": "protocol version" },
+    "id": { "type": "string", "description": "ULID — globally unique, time-sortable; idempotency key and replay cursor" },
+    "ts": { "type": "string", "format": "date-time" },
+    "from": { "type": "string", "description": "sender agent URI, e.g. agent://orders@deviceA" },
+    "to": {
+      "oneOf": [
+        { "type": "array", "items": { "type": "string" }, "description": "agent ids and/or topic:// addresses" },
+        { "const": "*", "description": "broadcast" }
+      ]
+    },
+    "seq": { "type": "integer", "description": "per-sender monotonic counter → single-source ordering" },
+    "kind": {
+      "enum": ["message", "event", "request", "response", "handoff", "presence", "ack"]
+    },
+    "corr": { "type": "string", "description": "correlation id pairing a response to its request" },
+    "subject": { "type": "string" },
+    "body": { "description": "text or structured payload" },
+    "content_type": { "type": "string" },
+    "artifacts": {
+      "type": "array",
+      "description": "out-of-band references to big payloads — NEVER inline them",
+      "items": {
+        "type": "object",
+        "required": ["uri"],
+        "properties": {
+          "uri": { "type": "string" },
+          "sha256": { "type": "string" },
+          "desc": { "type": "string" }
+        }
+      }
+    },
+    "ttl": { "type": "integer", "description": "seconds" },
+    "sig": { "type": "string", "description": "optional ed25519 signature (roadmap P4)" }
+  }
+}
