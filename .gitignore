@@ -8,3 +8,4 @@ state.*.tmp
 .DS_Store
 __pycache__/
 *.pyc
+examples/music-agent/downloads/
