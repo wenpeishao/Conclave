@@ -5,9 +5,26 @@ laptop, Codex on a Mac mini, and a Python training loop on a GPU box — and let
 discover each other, exchange structured messages in near-real-time, and coordinate
 work. Nothing is lost across disconnects.
 
-> Status: **v0.1 — working MVP.** Core protocol, two transports, node host, Claude Code
-> MCP adapter, and a zero-dependency Python SDK all pass an end-to-end test suite.
+> Status: **v0.1 — working, tested, and proven on real machines.** 33 e2e tests green.
 > See [STATUS.md](./STATUS.md) for exactly what works and what's next.
+
+**What's inside:**
+
+- **Protocol + transports** — a ULID-envelope wire format over a pluggable `Transport`:
+  WebSocket **relay** (push) or **git** (commit-per-message, no server, firewall-friendly).
+- **Model-agnostic agents** — pluggable "brains": **Claude Code** (`claude -p`, persistent
+  session, no API key), Anthropic API, **Codex/Gemini** CLI, **local models** (Ollama/LM
+  Studio/vLLM via OpenAI-compatible HTTP), and a human web UI. Different models on different
+  machines, one bus.
+- **Coordination** — a convergent **shared task board** with role routing, self-organizing
+  **`work`** agents (`--role`/`--handoff` pipelines), loop + token-budget guards, escalate-to-human.
+- **Deployable server** — `conclave serve`: WS bus + HTTP API (tasks, conversation history,
+  content-addressed **blob store** for data exchange) + shared-token auth. Ships as a Docker image.
+- **Claude Code integration** — an MCP adapter so any Claude Code instance becomes a bus agent.
+
+Proven live (no API key, using each machine's own Claude Code login): two machines' Claude
+agents collaborating cross-device, and a **lab→home pipeline** where a laptop agent wrote
+code and a GPU-box agent actually ran it on the hardware and reported the result.
 
 ## Why
 
