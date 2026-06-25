@@ -156,7 +156,9 @@ export class NodeHost {
     if (zone) env.zone = zone;
     if (this.identity) env = signEnvelope(env, this.identity.privateKey);
     this.markSeen(env.id); // never deliver our own message back to ourselves
-    await this.append("outbound.ndjson", env);
+    // Publish BEFORE the (non-blocking) WAL write so concurrent fire-and-forget sends go on the
+    // wire in seq/call order — gating publish behind an un-serialized appendFile reordered them.
+    void this.append("outbound.ndjson", env).catch(() => {});
     this.scheduleSave();
     await this.t.publish(env, opts.wantAck);
     return env;
