@@ -137,9 +137,12 @@ export class NodeHost {
       return;
     }
     this.markSeen(e.id);
-    if (e.from === this.card.id) {
+    // Own echo: drop our own messages/requests (so the agent runtime doesn't react to itself),
+    // but DELIVER our own `event`s — convergent state like the task board must see its own ops
+    // when a fresh process replays history it posted in a previous run.
+    if (e.from === this.card.id && e.kind !== "event") {
       this.scheduleSave();
-      return; // own echo
+      return;
     }
     if (e.kind === "presence") {
       this.updateRoster(e);

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { ConclaveServer } from "../src/server/conclave-server.js";
 import { NodeHost } from "../src/node/host.js";
 import { RelayWSTransport } from "../src/transports/relay-ws.js";
+import { TaskBoard } from "../src/agent/task-board.js";
 import { generateIdentity, signData, type Identity } from "../src/core/identity.js";
 import { tmpDir, wait, until } from "./helpers.js";
 
@@ -154,6 +155,34 @@ test("zones: a late-joining same-zone member receives prior zone history via rep
   assert.ok(bobGot.includes("earlier zone-A message"), "late joiner replays the zone history");
 
   await bob.stop();
+  await server.stop();
+});
+
+test("zones: an agent that reconnects sees the task it posted itself (own-event replay)", async () => {
+  const dir = await tmpDir();
+  const server = new ConclaveServer({ wsPort: 0, httpPort: 0, dataDir: dir, token: CT, adminToken: AT });
+  await server.start();
+  const base = `http://127.0.0.1:${server.httpPort()}`;
+  const wsUrl = `ws://127.0.0.1:${server.wsPort()}`;
+
+  const aliceId = await enroll(base, "alice", ["s-A"]);
+
+  // Alice posts a task, then her process exits.
+  const poster = new NodeHost({ card: { id: aliceId.id, name: "alice" }, transport: new RelayWSTransport(wsUrl, CT, aliceId), dataDir: await tmpDir(), identity: aliceId, zone: "s-A", heartbeatMs: 60000 });
+  const board1 = new TaskBoard(poster);
+  await poster.start();
+  const taskId = await board1.add("alice's own task", { for: "worker" });
+  await wait(400);
+  await poster.stop();
+
+  // A fresh Alice process (no local state) reconnects and must still see HER OWN task via replay.
+  const reconnect = new NodeHost({ card: { id: aliceId.id, name: "alice" }, transport: new RelayWSTransport(wsUrl, CT, aliceId), dataDir: await tmpDir(), identity: aliceId, zone: "s-A", heartbeatMs: 60000 });
+  const board2 = new TaskBoard(reconnect);
+  await reconnect.start();
+  await until(() => board2.list().some((t) => t.id === taskId), 4000);
+  assert.ok(board2.list().some((t) => t.id === taskId), "reconnecting agent sees its own posted task");
+
+  await reconnect.stop();
   await server.stop();
 });
 
