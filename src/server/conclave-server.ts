@@ -201,7 +201,9 @@ export class ConclaveServer {
         const owner = this.claimedTasks.get(op.id) ?? task.claimedBy;
         if (!owner) return { ok: false, reason: "done before any claim" };
         if (owner !== env.from) return { ok: false, reason: "only the claiming agent may complete a task" };
-        this.claimedTasks.delete(op.id); // task finished → release the lock + bound the map
+        // Keep the ownership entry after done (do NOT delete): the hub's board is eventually
+        // consistent, so dropping it here lets a stale in-flight claim that predates the board
+        // catching up slip through and RE-RUN the task. A done task is terminal anyway.
       } else if (op.op === "release") {
         // Only the hub releases (on revoke); the hub bypasses this branch above. A non-hub
         // agent must not be able to un-claim another agent's task.

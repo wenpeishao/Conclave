@@ -56,6 +56,7 @@ export class NodeHost {
   private ackHandlers: ((id: string) => void)[] = [];
   private hbTimer: ReturnType<typeof setInterval> | null = null;
   private saveChain: Promise<void> = Promise.resolve();
+  private outboundChain: Promise<void> = Promise.resolve();
   private saveCounter = 0;
 
   constructor(o: HostOpts) {
@@ -156,11 +157,15 @@ export class NodeHost {
     if (zone) env.zone = zone;
     if (this.identity) env = signEnvelope(env, this.identity.privateKey);
     this.markSeen(env.id); // never deliver our own message back to ourselves
-    // Publish BEFORE the (non-blocking) WAL write so concurrent fire-and-forget sends go on the
-    // wire in seq/call order — gating publish behind an un-serialized appendFile reordered them.
-    void this.append("outbound.ndjson", env).catch(() => {});
     this.scheduleSave();
-    await this.t.publish(env, opts.wantAck);
+    // Fire the publish synchronously (the ws.send runs before the first await) so concurrent
+    // fire-and-forget sends go on the wire in seq/call order. The WAL append is SERIALIZED on a
+    // chain — ordered, and no appendFile storm — but does not gate the publish.
+    const pub = this.t.publish(env, opts.wantAck);
+    this.outboundChain = this.outboundChain
+      .then(() => this.append("outbound.ndjson", env))
+      .catch((e) => console.error("[conclave] outbound WAL error:", e));
+    await pub;
     return env;
   }
 
