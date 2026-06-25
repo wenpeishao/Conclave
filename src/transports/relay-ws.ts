@@ -82,7 +82,16 @@ export class RelayWSTransport implements Transport {
 
   async stop(): Promise<void> {
     this.closing = true;
-    this.ws?.close();
+    const ws = this.ws;
+    // Flush buffered frames before closing so a just-published message (e.g. a one-shot
+    // `conclave board add`) actually reaches the relay instead of dying in the send buffer.
+    if (ws && ws.readyState === ws.OPEN) {
+      const deadline = Date.now() + 2000;
+      while (ws.bufferedAmount > 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    }
+    ws?.close();
   }
 
   async publish(env: Envelope): Promise<void> {

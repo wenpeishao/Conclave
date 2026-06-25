@@ -22,6 +22,10 @@ Everything below is **implemented and tested**, not aspirational.
 | **Rule brain** (deterministic) + **echo brain** | ✅ | agent |
 | **Anthropic brain** (claude-opus-4-8, adaptive thinking) | ✅ typecheck; ⚠️ live call untested (needs ANTHROPIC_API_KEY) | — |
 | **Claude Code teammate brain** (`--brain claude`, persistent session, no API key) | ✅ | manual (memory across messages verified live) |
+| **Shared task board** (convergent reduce, earliest-ULID claim wins) | ✅ | `test/task-board.test.ts` (26/26) |
+| Cross-process board over a live relay (`conclave board` add/claim/done) | ✅ | live (fresh process reconstructs board from relay log) |
+| **`conclave team`** one-command launcher (relay + Claude teammates) | ✅ | manual |
+| RelayWS drains send buffer before close (one-shot publishes not lost) | ✅ | live board demo |
 | **CLI-shim brain** (generic subprocess) + **codex/gemini presets** | ✅ | `test/cli-brain.test.ts` |
 | Subprocess-driven agent answering on the bus (arg + stdin modes) | ✅ | cli-brain |
 | CLI-shim failure → no-op (missing binary doesn't crash) | ✅ | cli-brain |
@@ -74,9 +78,16 @@ npm install && npm test && npm run example
   integration tests against real backends.
 - **P3** — NATS transport (HA push); ack/redelivery on RelayWS for unsent-on-restart.
 - **P4** — ed25519 signing + capability-scoped tokens (who may ask whom to do what).
-- **P5** — *(mostly done)* **LoopGuard** (rate + ping-pong), **TokenBudget** (real-usage
-  spend cap), **escalate-to-human**, and a **human web-UI agent** all landed. Remaining:
-  a coordination layer (shared task board, `owns` locks) and a richer room UI.
+- **P5** — *(mostly done)* **LoopGuard**, **TokenBudget**, **escalate-to-human**, a
+  **human web-UI agent**, and now a **shared task board** (convergent, cross-device) +
+  **`conclave team`** launcher all landed. Remaining: `owns` locks and a richer room UI.
+- **Toward "Agent Teams, but cross-device"** — persistent Claude Code teammates + shared
+  task board exist. **Next step:** wire teammates to *autonomously* work the board (each
+  runs a `TaskBoard` + `claimNext` loop, emitting claim/done from its brain) so a posted
+  goal gets decomposed, claimed, and done without a human relaying every message. Known
+  PoC caveats (from adversarial review): claim is advisory under concurrency (min-ULID
+  wins, verify before irreversible work); board `events` log is unbounded (fine at PoC
+  scale); `conclave board` sync uses a short settle delay, not a relay ack.
 - **Channels push** — the MCP adapter now emits a logging notification per inbound message
   (proven with an in-memory MCP client). Turning that into an actual turn-interrupt needs
   Claude Code's experimental `--channels` (client-side, out of our scope).

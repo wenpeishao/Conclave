@@ -24,6 +24,9 @@ function parseArgs(argv: string[]): { cmd: string; args: Args } {
         args[key] = next;
         i++;
       }
+    } else if (args["_sub"] === undefined) {
+      // first bare token after the command, e.g. `board add` -> _sub="add"
+      args["_sub"] = a;
     }
   }
   return { cmd, args };
@@ -209,6 +212,59 @@ async function cmdAgent(a: Args) {
   });
 }
 
+async function cmdBoard(a: Args) {
+  const sub = str(a, "_sub") || "list"; // set by main() from the positional arg
+  const name = str(a, "as", "board-cli");
+  const card = makeCard(a, name);
+  const host = new NodeHost({ card, transport: buildTransport(transportFromArgs(a, name)), dataDir: dataHome(a) });
+  const { TaskBoard } = await import("./agent/task-board.js");
+  const board = new TaskBoard(host);
+  await host.start();
+
+  const printBoard = () => {
+    const tasks = board.list();
+    if (!tasks.length) {
+      console.log("(board empty)");
+      return;
+    }
+    for (const t of tasks) {
+      const mark = t.status === "done" ? "[x]" : t.status === "claimed" ? "[~]" : "[ ]";
+      const who = t.claimedBy ? ` @${t.claimedBy}` : "";
+      const res = t.result ? `  => ${t.result}` : "";
+      console.log(`${mark} ${t.id}  ${t.title}${who}${res}`);
+    }
+  };
+
+  // Give the board a moment to sync from the bus before acting/printing.
+  await new Promise((r) => setTimeout(r, str(a, "transport") === "git" ? 1500 : 600));
+
+  if (sub === "watch") {
+    console.log("[conclave] watching task board. Ctrl-C to exit.");
+    board.onChange(() => {
+      console.log("--- board ---");
+      printBoard();
+    });
+    printBoard();
+    return;
+  }
+  if (sub === "add") {
+    const id = await board.add(str(a, "title") || str(a, "body") || "untitled task");
+    console.log(`added ${id}`);
+  } else if (sub === "claim") {
+    // --task (not --id): --id is the agent-identity flag consumed by makeCard.
+    await board.claim(str(a, "task"));
+    console.log(`claimed ${str(a, "task")}`);
+  } else if (sub === "done") {
+    await board.done(str(a, "task"), str(a, "result") || undefined);
+    console.log(`done ${str(a, "task")}`);
+  } else {
+    printBoard();
+  }
+  await new Promise((r) => setTimeout(r, str(a, "transport") === "git" ? 1500 : 400));
+  await host.stop();
+  process.exit(0);
+}
+
 async function cmdHuman(a: Args) {
   const name = str(a, "as", "human");
   const card = makeCard(a, name);
@@ -222,6 +278,64 @@ async function cmdHuman(a: Args) {
   console.log("[conclave] open it in a browser; you are now an agent on the bus. Ctrl-C to stop.");
   process.on("SIGINT", () => {
     void server.stop().then(() => process.exit(0));
+  });
+}
+
+async function cmdTeam(a: Args) {
+  const members = str(a, "members")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (!members.length) throw new Error("team requires --members alice,bob,carol");
+  const port = a["port"] ? Number(a["port"]) : 8787;
+  const brainKind = str(a, "brain", "claude");
+  const guardN = a["guard"] ? Number(a["guard"]) : 6;
+  const dataRoot = path.join(dataHome(a), "team");
+
+  const relay = new RelayServer({ port, logFile: path.join(dataRoot, "relay.log") });
+  await relay.start();
+  const url = `ws://127.0.0.1:${relay.port()}`;
+  console.log(`[conclave] team relay on ws://0.0.0.0:${relay.port()}`);
+
+  const { LoopGuard } = await import("./agent/loop-guard.js");
+  const agents: AutonomousAgent[] = [];
+  for (const m of members) {
+    const card = makeCard(a, m);
+    card.id = `agent://${m}`; // bare id for clean addressing within the team
+    const host = new NodeHost({ card, transport: buildTransport({ kind: "relay", url }), dataDir: path.join(dataRoot, m) });
+    // NOTE: teammates coordinate via direct messages today. Autonomous task-board working
+    // (each teammate runs a TaskBoard + claimNext loop, emitting claim/done) is the next
+    // step — until then we don't subscribe them to topic://tasks (it would just feed
+    // unactable task events to the model).
+    let brain;
+    if (brainKind === "claude") {
+      const { claudeCodeBrain } = await import("./agent/brains/claude-code.js");
+      brain = claudeCodeBrain({ persona: str(a, "persona") || undefined });
+    } else {
+      brain = echoBrain();
+    }
+    host.onMessage((e) => {
+      if (e.from !== card.id) printIncoming(e);
+    });
+    const agent = new AutonomousAgent(host, brain, {
+      guard: new LoopGuard({ maxConsecutivePerPeer: guardN, maxRepliesPerWindow: 200, windowMs: 600000 }),
+    });
+    await agent.start();
+    agents.push(agent);
+    console.log(`[conclave]   teammate up: ${card.id} (${brainKind} brain, guard=${guardN})`);
+  }
+
+  console.log(`[conclave] team ready (${members.length} members).`);
+  console.log(`[conclave]   remote teammates join: conclave agent --as <name> --url ws://<this-host>:${relay.port()}`);
+  console.log(`[conclave]   post work:  conclave board --as you --url ${url} add --title "..."`);
+  console.log(`[conclave]   watch board: conclave board --as you --url ${url} watch`);
+  console.log("[conclave] Ctrl-C to stop the team.");
+  process.on("SIGINT", () => {
+    void (async () => {
+      for (const ag of agents) await ag.stop();
+      await relay.stop();
+      process.exit(0);
+    })();
   });
 }
 
@@ -256,6 +370,13 @@ function help() {
   conclave human --as <name> [--port 7070] (transport flags as above)
         run a web UI that puts YOU on the bus as an agent (inbox + send form).
         Also receives loop-guard escalations from other agents.
+
+  conclave team  --members alice,bob,carol [--brain claude] [--port 8787] [--guard 6]
+        one command: start a relay + persistent Claude Code teammates (no API key).
+        Remote teammates join with 'conclave agent --url ws://<host>:<port>'.
+
+  conclave board <add|list|claim|done|watch> --as <name> (transport flags as above)
+        shared task board: add --title "..." | list | claim --task X | done --task X [--result R] | watch
         (transport flags as above)
 
 Examples:
@@ -278,6 +399,10 @@ async function main() {
       return cmdAgent(args);
     case "human":
       return cmdHuman(args);
+    case "team":
+      return cmdTeam(args);
+    case "board":
+      return cmdBoard(args);
     default:
       help();
   }

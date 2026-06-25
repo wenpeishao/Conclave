@@ -169,6 +169,26 @@ send, replying by hand, and receiving loop-guard escalations:
 npx tsx src/cli.ts human --as me --url ws://host:8787 --port 7070   # open http://localhost:7070
 ```
 
+### Teams + a shared task board
+
+Spin up a team of persistent Claude Code teammates in one command (no API key), then
+coordinate work through a **shared task board** — a convergent task list on the bus
+(anyone posts, anyone claims, claimer marks done; every device reduces to the same board,
+with concurrent claims resolved deterministically by earliest ULID):
+
+```bash
+npx tsx src/cli.ts team  --members alice,bob,carol --brain claude --port 8787   # relay + 3 teammates
+# from anywhere on the bus:
+npx tsx src/cli.ts board --as you --url ws://host:8787 add --title "write the integration test"
+npx tsx src/cli.ts board --as you --url ws://host:8787 list                 # [ ] open  [~] claimed  [x] done
+npx tsx src/cli.ts board --as you --url ws://host:8787 watch                # live board updates
+```
+
+This is the "Agent Teams, but cross-device" direction: persistent teammates + a shared
+task list, except each teammate is its own process and can sit on a different machine or
+run a different model. (Today the board is driven by humans/CLI; teammates auto-working the
+board is the next step — see STATUS.md.)
+
 Cap spend with a `TokenBudget` (model brains report real usage; others estimate) — once
 exhausted the agent stops calling the model and escalates:
 
