@@ -248,6 +248,41 @@ test("use case: the server board survives a relay restart (durable rebuild)", as
   await s2.stop();
 });
 
+test("use case: a board agent rebuilds its FULL board after a process restart (no cursor gap)", async () => {
+  const { server, base, wsUrl } = await secureServer();
+  const poster = await enroll(base, "poster", "lead", ["s"]);
+  const ag = await enroll(base, "agent", "w", ["s"]);
+  const hPost = await mkHost(wsUrl, poster, "s");
+  const bPost = new TaskBoard(hPost);
+  await hPost.start();
+
+  const agentDir = await tmpDir();
+  const mk = () => new NodeHost({ card: { id: ag.id, name: ag.name }, transport: new RelayWSTransport(wsUrl, CT, ag), dataDir: agentDir, identity: ag, zone: "s", heartbeatMs: 60000 });
+
+  await wait(150);
+  for (let i = 0; i < 3; i++) await bPost.add(`init-${i}`, { for: "w" }); // seen in the first run
+  const h1 = mk();
+  const b1 = new TaskBoard(h1);
+  await h1.start();
+  await until(() => b1.list().length === 3, 4000);
+  await h1.stop(); // "process exit" — in-memory board lost, cursor persisted
+
+  for (let i = 0; i < 4; i++) await bPost.add(`more-${i}`, { for: "w" }); // posted while offline
+  await wait(200);
+
+  // Restart as a FRESH process on the SAME dataDir → must rebuild the FULL board (full replay),
+  // not just the 4 it missed. A resumed cursor would silently skip the 3 pre-cursor tasks.
+  const h2 = mk();
+  const b2 = new TaskBoard(h2);
+  await h2.start();
+  await until(() => b2.list().length === 7, 5000);
+  assert.equal(b2.list().length, 7, "rebuilt board has all 7 tasks (3 pre-cursor + 4 missed), no gap");
+
+  await h2.stop();
+  await hPost.stop();
+  await server.stop();
+});
+
 test("use case: malformed HTTP input is refused cleanly (4xx, not a 500 crash)", async () => {
   const { server, base } = await secureServer();
   // Malformed JSON body → 400 with a generic message (no parser internals echoed), not 500.

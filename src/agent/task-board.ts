@@ -102,6 +102,10 @@ export class TaskBoard {
   constructor(host: NodeHost) {
     this.host = host;
     host.subscribe(TASKS_TOPIC);
+    // The board's reduced state lives only in memory, so a fresh process must re-read the WHOLE
+    // log to rebuild it — resuming from a saved cursor would skip pre-cursor task history and
+    // silently produce an incomplete board. (The server hub does the same for its own board.)
+    host.requireFullReplay();
     host.onMessage((e) => {
       if (e.kind === "event" && e.subject === "task" && isTaskOp(e.body)) {
         this.record(e.id, e.from, e.body);

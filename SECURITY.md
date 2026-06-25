@@ -54,6 +54,9 @@ ownership, or take the server down cheaply.
 - Task claims have no lease/TTL yet: a claim is released on completion or when the claimer is
   revoked, but an agent that claims and then silently dies (without being revoked) pins that one
   task until an admin revokes it. (Claim leases are on the roadmap.)
+- Delivery to message handlers is **not strictly FIFO** under concurrency — the bus is
+  eventually-consistent, so a handler that needs per-sender order should sort by `seq`/`ts`.
+  Convergent consumers (the task board) are order-independent and unaffected.
 - TLS is expected to be terminated by a reverse proxy in front of the server (`wss://`/`https://`).
 - The relay is a single process (no HA); the durable log is not yet compacted. For a no-server,
   no-single-point deployment, use the GitBus transport.

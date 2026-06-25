@@ -104,6 +104,14 @@ export class NodeHost {
     return !!this.identity;
   }
 
+  /** Force a full replay from the durable log on (re)start instead of resuming from the saved
+   *  cursor. A convergent overlay (TaskBoard) holds its reduced state only in memory, so on a
+   *  fresh process it must re-read the WHOLE log to rebuild — a saved cursor would skip the
+   *  history it needs. Call before start(). (The server hub does the same for its board.) */
+  requireFullReplay(): void {
+    this.replayFromZero = true;
+  }
+
   /** Update this agent's advertised availability and re-announce it on the global roster. */
   setStatus(status: string): void {
     this.card.status = status;
