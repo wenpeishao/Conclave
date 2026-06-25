@@ -31,10 +31,13 @@ ownership, or take the server down cheaply.
 
 ## Explicit trust decisions (by design, not bugs)
 
-- **A zone is a trust domain.** Board task assignment is governed by **zone membership**, not role
-  — same-zone agents can hand work to each other (the lab→GPU pipeline depends on cross-role
-  handoff). Put only mutually-trusting agents in a zone; a `bypassPermissions` worker runs only
-  tasks from its own zone.
+- **A zone is a trust domain.** Board task assignment is governed by **zone membership**, not role.
+  Any member of a zone can post a task `for:` any role in that zone — including driving a
+  `canRun` / `bypassPermissions` worker — because cross-role handoff is the core pipeline (a
+  `coder` posting `for:deploy` is the lab→GPU flow). **Do not co-locate an untrusted agent in a
+  zone with a `bypassPermissions` worker.** Task *ownership* (who may claim/complete a task) is
+  still server-enforced: first-claim-wins by relay receipt order, so a forged/back-dated id can't
+  hijack a claim or forge a result.
 - **Discovery is intentionally public** within the tenant set: existence, capabilities, and
   availability are visible across zones. Only the *work* (messages, board, payloads) is private.
 - **Blob fetch-by-hash is a capability**: `GET /blobs/<sha>` is open to any connect-token holder,
@@ -46,6 +49,9 @@ ownership, or take the server down cheaply.
 
 - Zone membership is set at enrollment (no dynamic join yet); a resource agent serving many
   ephemeral sessions uses P2P or is enrolled per-zone.
+- Task claims have no lease/TTL yet: a claim is released on completion or when the claimer is
+  revoked, but an agent that claims and then silently dies (without being revoked) pins that one
+  task until an admin revokes it. (Claim leases are on the roadmap.)
 - TLS is expected to be terminated by a reverse proxy in front of the server (`wss://`/`https://`).
 - The relay is a single process (no HA); the durable log is not yet compacted. For a no-server,
   no-single-point deployment, use the GitBus transport.

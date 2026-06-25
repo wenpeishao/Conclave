@@ -200,6 +200,7 @@ export class ConclaveServer {
         const owner = this.claimedTasks.get(op.id) ?? task.claimedBy;
         if (!owner) return { ok: false, reason: "done before any claim" };
         if (owner !== env.from) return { ok: false, reason: "only the claiming agent may complete a task" };
+        this.claimedTasks.delete(op.id); // task finished → release the lock + bound the map
       }
     }
     return { ok: true };
@@ -321,7 +322,13 @@ export class ConclaveServer {
       }
       if (req.method === "POST" && p === "/admin/revoke") {
         const body = await readJson(req);
-        const ok = this.registry.revoke(String(body.name ?? ""));
+        const name = String(body.name ?? "");
+        const ok = this.registry.revoke(name);
+        if (ok) {
+          // Free any tasks the revoked agent was holding, so they can be re-claimed (liveness).
+          const id = name.startsWith("agent://") ? name : `agent://${name}`;
+          for (const [tid, owner] of this.claimedTasks) if (owner === id) this.claimedTasks.delete(tid);
+        }
         return send(ok ? 200 : 404, ok ? { revoked: true } : { error: "agent not found" });
       }
       return send(405, { error: "method not allowed" });
