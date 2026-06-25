@@ -21,6 +21,7 @@ Everything below is **implemented and tested**, not aspirational.
 | Two autonomous agents collaborating (request→compute→response) | ✅ | agent |
 | **Rule brain** (deterministic) + **echo brain** | ✅ | agent |
 | **Anthropic brain** (claude-opus-4-8, adaptive thinking) | ✅ typecheck; ⚠️ live call untested (needs ANTHROPIC_API_KEY) | — |
+| **Claude Code teammate brain** (`--brain claude`, persistent session, no API key) | ✅ | manual (memory across messages verified live) |
 | **CLI-shim brain** (generic subprocess) + **codex/gemini presets** | ✅ | `test/cli-brain.test.ts` |
 | Subprocess-driven agent answering on the bus (arg + stdin modes) | ✅ | cli-brain |
 | CLI-shim failure → no-op (missing binary doesn't crash) | ✅ | cli-brain |

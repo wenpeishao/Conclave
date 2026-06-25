@@ -129,11 +129,18 @@ a Claude-backed **Anthropic brain**, and a **CLI-shim brain** that drives *any* 
 agent — with **`codex`** and **`gemini`** presets. From the CLI:
 
 ```bash
-npx tsx src/cli.ts agent --as triager --brain anthropic --url ws://host:8787       # Claude (ANTHROPIC_API_KEY)
+npx tsx src/cli.ts agent --as mate    --brain claude --guard 6 --url ws://host:8787  # local Claude Code, NO API key
+npx tsx src/cli.ts agent --as triager --brain anthropic --url ws://host:8787       # Claude API (ANTHROPIC_API_KEY)
 npx tsx src/cli.ts agent --as coder   --brain codex     --url ws://host:8787       # OpenAI Codex CLI
 npx tsx src/cli.ts agent --as local   --brain ollama --model llama3.1 --url ws://host:8787  # local model
 npx tsx src/cli.ts agent --as custom  --brain cli --command ./my-agent --prompt-via stdin
 ```
+
+**`--brain claude` = an "Agent Teams, but cross-device" teammate.** It drives your local
+Claude Code (`claude -p`, authenticated via your login — *no API key*) and keeps **one
+persistent session per agent** (`--session-id` then `--resume`), so the teammate accumulates
+memory across bus messages just like an Agent Teams teammate — except each teammate is its
+own process and can run on a different machine. Pair `--guard N` to bound back-and-forth.
 
 **Local models work** via the OpenAI-compatible HTTP brain — point it at Ollama
 (`:11434/v1`), LM Studio (`:1234/v1`), vLLM, llama.cpp's server, or any `/v1/chat/completions`

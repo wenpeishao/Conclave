@@ -161,6 +161,16 @@ async function cmdAgent(a: Args) {
     if (brainKind === "ollama") brain = ollamaBrain(model, { apiKey });
     else if (brainKind === "lmstudio") brain = lmStudioBrain(model, { apiKey });
     else brain = openaiCompatBrain({ baseUrl: str(a, "base-url") || undefined, model, apiKey });
+  } else if (brainKind === "claude") {
+    // Stateful Claude Code teammate: persistent session (memory across messages), via your
+    // CC login (no API key). The "Agent Teams, but cross-device" core.
+    const { claudeCodeBrain } = await import("./agent/brains/claude-code.js");
+    brain = claudeCodeBrain({
+      sessionId: str(a, "session-id") || undefined,
+      persona: str(a, "persona") || undefined,
+      model: str(a, "model") || undefined,
+      effort: str(a, "effort") || undefined,
+    });
   } else if (brainKind === "codex" || brainKind === "gemini" || brainKind === "cli") {
     const { cliBrain, codexBrain, geminiBrain } = await import("./agent/brains/cli.js");
     const shell = a["shell"] === true;
@@ -179,9 +189,20 @@ async function cmdAgent(a: Args) {
   } else {
     brain = echoBrain();
   }
-  const agent = new AutonomousAgent(host, brain);
+
+  // Optional loop guard: --guard N caps consecutive replies to one peer (bounds discussions).
+  const agentOpts: { guard?: import("./agent/loop-guard.js").LoopGuard } = {};
+  if (a["guard"]) {
+    const { LoopGuard } = await import("./agent/loop-guard.js");
+    agentOpts.guard = new LoopGuard({ maxConsecutivePerPeer: Number(a["guard"]), maxRepliesPerWindow: 200, windowMs: 600000 });
+  }
+
+  // Show inbound traffic in this agent's terminal so a discussion is visible live.
+  host.onMessage((e) => printIncoming(e));
+
+  const agent = new AutonomousAgent(host, brain, agentOpts);
   await agent.start();
-  console.log(`[conclave] autonomous agent ${card.id} running with '${brainKind}' brain`);
+  console.log(`[conclave] autonomous agent ${card.id} running with '${brainKind}' brain${a["guard"] ? ` (guard=${a["guard"]})` : ""}`);
   console.log("[conclave] it will react to incoming messages. Ctrl-C to stop.");
   process.on("SIGINT", () => {
     void agent.stop().then(() => process.exit(0));
@@ -220,9 +241,11 @@ function help() {
                  [--kind message|event|request] (transport flags as above)
         fire one message and exit.
 
-  conclave agent --as <name> [--brain echo|anthropic|codex|gemini|cli]
-        run a model-driven agent that reacts to incoming messages. Brains:
-          anthropic  Claude (needs ANTHROPIC_API_KEY) [--model <id>] [--system <p>]
+  conclave agent --as <name> [--brain echo|claude|anthropic|codex|gemini|cli|local|ollama] [--guard N]
+        run a model-driven agent that reacts to incoming messages (--guard N bounds
+        a back-and-forth: max N consecutive replies to one peer). Brains:
+          claude     local 'claude -p' via your CC login (NO API key)
+          anthropic  Claude API (needs ANTHROPIC_API_KEY) [--model <id>] [--system <p>]
           codex      OpenAI Codex CLI (codex exec)     [--shell on Windows]
           gemini     Google Gemini CLI (gemini -p)
           cli        any subprocess  --command <bin> [--cmd-args a,b] [--prompt-via arg|stdin]

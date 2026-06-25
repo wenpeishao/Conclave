@@ -139,3 +139,20 @@ export function codexBrain(opts: Partial<CliBrainOpts> = {}): Brain {
 export function geminiBrain(opts: Partial<CliBrainOpts> = {}): Brain {
   return cliBrain({ command: "gemini", args: ["-p"], promptVia: "arg", ...opts });
 }
+
+/**
+ * Claude Code CLI preset — uses the LOCAL `claude -p` (print mode) as the brain,
+ * authenticated through the user's existing Claude Code login (no API key needed). The
+ * prompt goes via stdin so arbitrary text is never shell-parsed. Each call is a full
+ * Claude Code turn, so it's powerful but not fast — pair with a LoopGuard for discussions.
+ */
+export function claudeBrain(opts: Partial<CliBrainOpts> = {}): Brain {
+  return cliBrain({
+    command: "claude",
+    args: ["-p"],
+    promptVia: "stdin",
+    shell: process.platform === "win32", // claude is a .cmd shim on Windows
+    timeoutMs: 120000,
+    ...opts,
+  });
+}
