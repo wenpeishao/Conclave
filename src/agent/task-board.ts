@@ -37,7 +37,7 @@ export interface Task {
   for?: string; // required role; only a worker with a matching role claims it (unset = anyone)
 }
 
-function isTaskOp(b: unknown): b is TaskOp {
+export function isTaskOp(b: unknown): b is TaskOp {
   if (typeof b !== "object" || b === null) return false;
   const op = (b as { op?: unknown }).op;
   return op === "add" || op === "claim" || op === "done";

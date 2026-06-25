@@ -32,6 +32,7 @@ export interface Envelope {
   content_type?: string; // text/markdown, application/json, ...
   artifacts?: Artifact[];
   ttl?: number; // seconds
+  zone?: string; // scope tag — server delivers zone-scoped envelopes only to that zone's members
   sig?: string; // optional ed25519 signature (P4)
 }
 

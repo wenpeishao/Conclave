@@ -74,3 +74,19 @@ export function verifyEnvelope(env: Envelope, publicKeyB64: string): boolean {
 export function randomToken(bytes = 24): string {
   return randomBytes(bytes).toString("base64url");
 }
+
+/** Sign an arbitrary JSON value (canonicalized) — used to authenticate a connection `hello`. */
+export function signData(privateKeyB64: string, obj: unknown): string {
+  const key = createPrivateKey({ key: Buffer.from(privateKeyB64, "base64"), format: "der", type: "pkcs8" });
+  return edSign(null, Buffer.from(canonicalJSON(obj), "utf8"), key).toString("base64");
+}
+
+/** Verify a signData() signature. */
+export function verifyData(publicKeyB64: string, obj: unknown, sig: string): boolean {
+  try {
+    const key = createPublicKey({ key: Buffer.from(publicKeyB64, "base64"), format: "der", type: "spki" });
+    return edVerify(null, Buffer.from(canonicalJSON(obj), "utf8"), key, Buffer.from(sig, "base64"));
+  } catch {
+    return false;
+  }
+}

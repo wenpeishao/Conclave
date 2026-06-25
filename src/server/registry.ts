@@ -18,6 +18,7 @@ export interface AgentRecord {
   name: string;
   role?: string;
   canRun: boolean; // may run/deploy (maps to bypassPermissions workers)
+  zones: string[]; // zone memberships — what zone-scoped traffic this agent may send/receive
   publicKey: string; // base64 SPKI DER
   revoked: boolean;
   createdTs: number;
@@ -29,6 +30,7 @@ interface PendingEnroll {
   name: string;
   role?: string;
   canRun: boolean;
+  zones: string[];
   expTs: number;
 }
 
@@ -60,7 +62,7 @@ export class AgentRegistry {
   }
 
   /** Admin: create a one-time enrollment token for a new agent name. */
-  invite(opts: { name: string; role?: string; canRun?: boolean; ttlMs?: number; now?: number }): PendingEnroll {
+  invite(opts: { name: string; role?: string; canRun?: boolean; zones?: string[]; ttlMs?: number; now?: number }): PendingEnroll {
     const name = opts.name.replace(/^agent:\/\//, "").trim();
     if (!name) throw new Error("name required");
     const id = `agent://${name}`;
@@ -74,6 +76,7 @@ export class AgentRegistry {
       name,
       role: opts.role,
       canRun: opts.canRun ?? false,
+      zones: opts.zones ?? [],
       expTs: now + (opts.ttlMs ?? 60 * 60 * 1000), // default 1h
     };
     this.pending.set(p.token, p);
@@ -95,6 +98,7 @@ export class AgentRegistry {
       name: p.name,
       role: p.role,
       canRun: p.canRun,
+      zones: p.zones,
       publicKey,
       revoked: false,
       createdTs: now,

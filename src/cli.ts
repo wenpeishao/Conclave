@@ -53,26 +53,34 @@ function transportFromArgs(a: Args, agentName: string): TransportConfig {
   return { kind: "relay", url: str(a, "url", "ws://127.0.0.1:8787"), token: str(a, "token") || process.env.CONCLAVE_TOKEN || undefined };
 }
 
+type StoredIdentity = Identity & { zones?: string[] };
+
 /** Load this device's enrolled identity (from --identity <file> or <data>/identity.json), if any. */
-function deviceIdentity(a: Args): Identity | undefined {
+function deviceIdentity(a: Args): StoredIdentity | undefined {
   if (str(a, "identity") === "none") return undefined;
   const file = str(a, "identity") || path.join(dataHome(a), "identity.json");
   try {
-    return JSON.parse(readFileSync(file, "utf8")) as Identity;
+    return JSON.parse(readFileSync(file, "utf8")) as StoredIdentity;
   } catch {
     return undefined;
   }
 }
 
-/** Build a NodeHost, reconciling the card id/name to the enrolled identity when present. */
-function buildHost(a: Args, name: string, transport: ReturnType<typeof buildTransport>): NodeHost {
+/**
+ * Build a NodeHost from flags, injecting the enrolled identity (signs envelopes + the
+ * connection hello) and the agent's zone (scopes its traffic) when present.
+ */
+function buildHost(a: Args, name: string): NodeHost {
   const ident = deviceIdentity(a);
+  const zone = ident?.zones?.[0] ?? (str(a, "zone") || undefined);
+  const cfg = transportFromArgs(a, name);
+  if (ident && cfg.kind === "relay") cfg.identity = ident;
   const card = makeCard(a, name);
   if (ident) {
     card.id = ident.id;
     card.name = ident.name;
   }
-  return new NodeHost({ card, transport, dataDir: dataHome(a), identity: ident });
+  return new NodeHost({ card, transport: buildTransport(cfg), dataDir: dataHome(a), identity: ident, zone });
 }
 
 function makeCard(a: Args, name: string): AgentCard {
@@ -110,8 +118,7 @@ async function cmdJoin(a: Args) {
   if (str(a, "enroll")) return cmdEnroll(a); // `join --enroll <token>` = device enrollment
   const name = str(a, "as");
   if (!name) throw new Error("join requires --as <name>");
-  const transport = buildTransport(transportFromArgs(a, name));
-  const host = buildHost(a, name, transport);
+  const host = buildHost(a, name);
   const card = host.card;
   host.onMessage((e) => printIncoming(e));
   await host.start();
@@ -173,7 +180,7 @@ async function cmdSend(a: Args) {
 async function cmdAgent(a: Args) {
   const name = str(a, "as");
   if (!name) throw new Error("agent requires --as <name>");
-  const host = buildHost(a, name, buildTransport(transportFromArgs(a, name)));
+  const host = buildHost(a, name);
   const brainKind = str(a, "brain", "echo");
   let brain;
   if (brainKind === "anthropic") {
@@ -282,12 +289,13 @@ async function cmdInvite(a: Args) {
   const admin = str(a, "admin-token") || process.env.CONCLAVE_ADMIN_TOKEN;
   if (!admin) throw new Error("invite requires --admin-token (or CONCLAVE_ADMIN_TOKEN)");
   const base = httpBase(a);
+  const zones = str(a, "zone") ? str(a, "zone").split(",").map((s) => s.trim()).filter(Boolean) : undefined;
   const res = await fetch(`${base}/admin/invite`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${admin}` },
-    body: JSON.stringify({ name, role: str(a, "role") || undefined, canRun: a["can-run"] === true }),
+    body: JSON.stringify({ name, role: str(a, "role") || undefined, canRun: a["can-run"] === true, zones }),
   });
-  const j = (await res.json()) as { enrollToken?: string; error?: string; role?: string; canRun?: boolean };
+  const j = (await res.json()) as { enrollToken?: string; error?: string; role?: string; canRun?: boolean; zones?: string[] };
   if (!res.ok) throw new Error(`invite failed: ${j.error ?? res.status}`);
   const wsUrl = str(a, "url", "ws://127.0.0.1:8787");
   const token = str(a, "token") || process.env.CONCLAVE_TOKEN || "<connect-token>";
@@ -309,12 +317,12 @@ async function cmdEnroll(a: Args) {
     headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
     body: JSON.stringify({ token: enroll, publicKey: ident.publicKey }),
   });
-  const j = (await res.json()) as { id?: string; role?: string; canRun?: boolean; error?: string };
+  const j = (await res.json()) as { id?: string; role?: string; canRun?: boolean; zones?: string[]; error?: string };
   if (!res.ok) throw new Error(`enroll failed: ${j.error ?? res.status}`);
   const file = str(a, "identity") || path.join(dataHome(a), "identity.json");
   mkdirSync(path.dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify(ident, null, 2));
-  console.log(`[conclave] enrolled ${j.id} (role=${j.role ?? "-"}, canRun=${j.canRun ?? false})`);
+  writeFileSync(file, JSON.stringify({ ...ident, zones: j.zones ?? [] }, null, 2));
+  console.log(`[conclave] enrolled ${j.id} (role=${j.role ?? "-"}, canRun=${j.canRun ?? false}, zones=[${(j.zones ?? []).join(", ")}])`);
   console.log(`[conclave] identity saved to ${file} — this device can now sign as ${j.id}.`);
   console.log(`[conclave] next: conclave work --as ${name} --url ${str(a, "url", "ws://127.0.0.1:8787")} --token ${token ?? "<token>"} --role ${j.role ?? "..."}`);
 }
@@ -322,7 +330,7 @@ async function cmdEnroll(a: Args) {
 async function cmdWork(a: Args) {
   const name = str(a, "as");
   if (!name) throw new Error("work requires --as <name>");
-  const host = buildHost(a, name, buildTransport(transportFromArgs(a, name)));
+  const host = buildHost(a, name);
   const { TaskBoard } = await import("./agent/task-board.js");
   const { TeamWorker } = await import("./agent/team-worker.js");
   const board = new TaskBoard(host);
@@ -356,7 +364,7 @@ async function cmdWork(a: Args) {
 async function cmdBoard(a: Args) {
   const sub = str(a, "_sub") || "list"; // set by main() from the positional arg
   const name = str(a, "as", "board-cli");
-  const host = buildHost(a, name, buildTransport(transportFromArgs(a, name)));
+  const host = buildHost(a, name);
   const { TaskBoard } = await import("./agent/task-board.js");
   const board = new TaskBoard(host);
   await host.start();

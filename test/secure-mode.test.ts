@@ -46,7 +46,7 @@ test("secure mode: only enrolled+signed agents can act; forged/unsigned/revoked 
   );
 
   // (1) Enrolled + signing host → its task is accepted.
-  const good = new NodeHost({ card: { id: "agent://coder", name: "coder" }, transport: new RelayWSTransport(wsUrl, CT), dataDir: dir, identity: coder, heartbeatMs: 60000 });
+  const good = new NodeHost({ card: { id: "agent://coder", name: "coder" }, transport: new RelayWSTransport(wsUrl, CT, coder), dataDir: dir, identity: coder, heartbeatMs: 60000 });
   const goodBoard = new TaskBoard(good);
   await good.start();
   await goodBoard.add("legit task");
@@ -60,7 +60,7 @@ test("secure mode: only enrolled+signed agents can act; forged/unsigned/revoked 
 
   // (3) Forged host: claims agent://coder but signs with a DIFFERENT key → rejected.
   const forger = generateIdentity("coder");
-  const forged = new NodeHost({ card: { id: "agent://coder", name: "coder" }, transport: new RelayWSTransport(wsUrl, CT), dataDir: await tmpDir(), identity: forger, heartbeatMs: 60000 });
+  const forged = new NodeHost({ card: { id: "agent://coder", name: "coder" }, transport: new RelayWSTransport(wsUrl, CT, forger), dataDir: await tmpDir(), identity: forger, heartbeatMs: 60000 });
   const forgedBoard = new TaskBoard(forged);
   await forged.start();
   await forgedBoard.add("forged task");

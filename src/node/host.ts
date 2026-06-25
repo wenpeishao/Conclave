@@ -22,6 +22,7 @@ export interface HostOpts {
   topics?: string[]; // topic:// addresses to receive (presence is always handled)
   heartbeatMs?: number;
   identity?: Identity; // if set, every outgoing envelope is ed25519-signed
+  zone?: string; // if set, outgoing envelopes are stamped with this zone (scoped delivery)
 }
 
 type MsgHandler = (e: Envelope) => void | Promise<void>;
@@ -40,6 +41,7 @@ export class NodeHost {
   private topics: Set<string>;
   private heartbeatMs: number;
   private identity?: Identity;
+  private zone?: string;
 
   private seq = 0;
   private cursor: string | null = null;
@@ -58,6 +60,7 @@ export class NodeHost {
     this.topics = new Set(o.topics ?? []);
     this.heartbeatMs = o.heartbeatMs ?? 10000;
     this.identity = o.identity;
+    this.zone = o.zone;
   }
 
   /** Register a sink for messages addressed to this agent. */
@@ -110,6 +113,7 @@ export class NodeHost {
     } = {},
   ): Promise<Envelope> {
     let env = makeEnvelope({ from: this.card.id, to, seq: ++this.seq, ...opts });
+    if (this.zone) env.zone = this.zone;
     if (this.identity) env = signEnvelope(env, this.identity.privateKey);
     this.markSeen(env.id); // never deliver our own message back to ourselves
     await this.append("outbound.ndjson", env);
@@ -156,6 +160,7 @@ export class NodeHost {
       kind: "presence",
       body: this.card,
     });
+    if (this.zone) env.zone = this.zone;
     if (this.identity) env = signEnvelope(env, this.identity.privateKey);
     try {
       await this.t.publish(env);

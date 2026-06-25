@@ -3,13 +3,13 @@ import * as path from "node:path";
 import { promises as fs, createReadStream, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import * as readline from "node:readline";
-import { RelayServer } from "../relay/server.js";
+import { RelayServer, type ConnBinding } from "../relay/server.js";
 import { NodeHost } from "../node/host.js";
 import { RelayWSTransport } from "../transports/relay-ws.js";
-import { TaskBoard, type Task } from "../agent/task-board.js";
-import type { Envelope } from "../core/types.js";
+import { TaskBoard, isTaskOp, type Task } from "../agent/task-board.js";
+import type { Envelope, AgentCard } from "../core/types.js";
 import { AgentRegistry } from "./registry.js";
-import { generateIdentity, type Identity } from "../core/identity.js";
+import { generateIdentity, verifyData, type Identity } from "../core/identity.js";
 
 /**
  * ConclaveServer — a deployable coordination backend. One process, three jobs:
@@ -94,15 +94,20 @@ export class ConclaveServer {
         const inv = this.registry.invite({ name: "hub", role: "server", canRun: true });
         this.registry.enroll(inv.token, this.hubIdentity.publicKey);
       }
-      // Gate every publish on a valid signature from a known, non-revoked agent.
-      this.relay.onVerify((env) => this.registry!.authorize(env));
+      // Gate every publish: valid signature from a known agent (identity) AND the action is
+      // allowed for that agent's role/zone (policy). The registry record is consumed here,
+      // not discarded — that is what makes role/canRun/zone real instead of decorative.
+      this.relay.onVerify((env) => this.authorizePolicy(env));
+      // Bind each connection to its authenticated identity + zones → scoped routing
+      // (directed/zone/global) instead of broadcast-to-all.
+      this.relay.onAuthenticate((hello) => this.authenticateConn(hello));
     }
 
     await this.relay.start();
     // A loopback bus participant that owns the canonical board view.
     this.host = new NodeHost({
       card: { id: "agent://hub", name: "hub", capabilities: ["server"] },
-      transport: new RelayWSTransport(`ws://127.0.0.1:${this.relay.port()}`, this.token),
+      transport: new RelayWSTransport(`ws://127.0.0.1:${this.relay.port()}`, this.token, this.hubIdentity),
       dataDir: path.join(this.dataDir, "hub"),
       heartbeatMs: 15000,
       identity: this.hubIdentity,
@@ -126,6 +131,57 @@ export class ConclaveServer {
     await new Promise<void>((r) => (this.httpServer ? this.httpServer.close(() => r()) : r()));
     await this.host.stop();
     await this.relay.stop();
+  }
+
+  /**
+   * The secure-mode authorization policy — runs on every publish. Identity first (signature
+   * by a known, non-revoked key), then ACTION authorization using the agent's registry record:
+   *   - presence may only advertise the sender's OWN id (no roster spoofing);
+   *   - a task claim requires the claimer's role to match the task's `for` role;
+   *   - a task done may only come from the agent that holds the claim;
+   *   - zone-scoped envelopes must be stamped with a zone the sender belongs to.
+   * The hub (the server's own identity) is the trusted control plane and bypasses action checks.
+   */
+  private authorizePolicy(env: Envelope): { ok: boolean; reason?: string } {
+    const decision = this.registry!.authorize(env);
+    if (!decision.ok || !decision.record) return decision;
+    const rec = decision.record;
+    if (env.from === this.hubIdentity?.id) return { ok: true }; // trusted control plane
+
+    // A sender may only stamp a zone it is a member of (enables safe zone routing).
+    if (env.zone && !(rec.zones ?? []).includes(env.zone)) {
+      return { ok: false, reason: `not a member of ${env.zone}` };
+    }
+    // Presence cannot impersonate another agent's roster entry (fixes roster spoofing).
+    if (env.kind === "presence") {
+      const card = env.body as AgentCard | undefined;
+      if (!card || card.id !== env.from) return { ok: false, reason: "presence id must equal from" };
+    }
+    // Board action authorization — role/canRun are enforced here, not just advised client-side.
+    if (env.kind === "event" && env.subject === "task" && isTaskOp(env.body)) {
+      const op = env.body;
+      if (op.op === "claim") {
+        const task = this.board.list().find((t) => t.id === op.id);
+        if (task?.for && task.for !== rec.role) {
+          return { ok: false, reason: `role '${rec.role ?? "-"}' may not claim a task for '${task.for}'` };
+        }
+      } else if (op.op === "done") {
+        const task = this.board.list().find((t) => t.id === op.id);
+        if (task?.claimedBy && task.claimedBy !== env.from) {
+          return { ok: false, reason: "only the claiming agent may complete a task" };
+        }
+      }
+    }
+    return { ok: true };
+  }
+
+  /** Authenticate a connection's signed hello → its routing binding (id + zones), or null. */
+  private authenticateConn(hello: { id?: string; cursor?: string | null; sig?: string }): ConnBinding | null {
+    if (!hello.id || !hello.sig) return null;
+    const rec = this.registry!.get(hello.id);
+    if (!rec || rec.revoked) return null;
+    if (!verifyData(rec.publicKey, { id: hello.id, cursor: hello.cursor ?? null }, hello.sig)) return null;
+    return { id: hello.id, zones: rec.zones ?? [], wildcard: hello.id === this.hubIdentity?.id };
   }
 
   private async loadOrMakeHubIdentity(): Promise<Identity> {
@@ -186,7 +242,7 @@ export class ConclaveServer {
       if (!token || !publicKey) return send(400, { error: "token and publicKey required" });
       try {
         const rec = this.registry.enroll(token, publicKey);
-        return send(200, { id: rec.id, name: rec.name, role: rec.role, canRun: rec.canRun });
+        return send(200, { id: rec.id, name: rec.name, role: rec.role, canRun: rec.canRun, zones: rec.zones });
       } catch (e) {
         return send(400, { error: (e as Error).message });
       }
@@ -210,9 +266,10 @@ export class ConclaveServer {
             name: String(body.name),
             role: body.role ? String(body.role) : undefined,
             canRun: body.canRun === true,
+            zones: Array.isArray(body.zones) ? body.zones.map(String) : undefined,
             ttlMs: body.ttlMs ? Number(body.ttlMs) : undefined,
           });
-          return send(200, { enrollToken: inv.token, id: inv.id, role: inv.role, canRun: inv.canRun, expTs: inv.expTs });
+          return send(200, { enrollToken: inv.token, id: inv.id, role: inv.role, canRun: inv.canRun, zones: inv.zones, expTs: inv.expTs });
         } catch (e) {
           return send(400, { error: (e as Error).message });
         }

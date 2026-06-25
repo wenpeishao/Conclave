@@ -1,6 +1,7 @@
 import { WebSocket } from "ws";
 import type { Transport } from "../core/transport.js";
 import type { Envelope } from "../core/types.js";
+import { signData, type Identity } from "../core/identity.js";
 
 /**
  * WebSocket client transport. Connects OUTBOUND to a relay (so it works from behind
@@ -20,13 +21,23 @@ export class RelayWSTransport implements Transport {
   private open = false;
   private closing = false;
   private backoff = 500;
+  private identity?: Identity;
 
-  constructor(url: string, token?: string) {
+  constructor(url: string, token?: string, identity?: Identity) {
     // Auth (if any) rides as a ?token= query param on the ws URL.
     if (token && !/[?&]token=/.test(url)) {
       url += (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token);
     }
     this.url = url;
+    this.identity = identity;
+  }
+
+  // A signed hello authenticates this connection to the relay so it can route by identity/zone.
+  private helloFrame(): object {
+    const base = { t: "hello", cursor: this.cursor };
+    if (!this.identity) return base;
+    const sig = signData(this.identity.privateKey, { id: this.identity.id, cursor: this.cursor });
+    return { ...base, id: this.identity.id, sig };
   }
 
   onEnvelope(h: (e: Envelope, c: string | null) => void) {
@@ -52,7 +63,7 @@ export class RelayWSTransport implements Transport {
       ws.on("open", () => {
         this.open = true;
         this.backoff = 500;
-        ws.send(JSON.stringify({ t: "hello", cursor: this.cursor }));
+        ws.send(JSON.stringify(this.helloFrame()));
         for (const e of this.outQ.splice(0)) ws.send(JSON.stringify({ t: "pub", env: e }));
         settle();
       });

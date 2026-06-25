@@ -24,6 +24,13 @@ export interface RelayOpts {
   token?: string; // if set, clients must connect with ?token=<token> or are refused
 }
 
+/** What the relay knows about an authenticated connection — drives scoped routing. */
+export interface ConnBinding {
+  id: string; // the authenticated agent id this socket speaks for
+  zones: string[]; // zone memberships → which zone-scoped traffic it receives
+  wildcard?: boolean; // receives everything (the hub / control plane)
+}
+
 export class RelayServer {
   private wss: WebSocketServer | null = null;
   private clients = new Set<WebSocket>();
@@ -33,6 +40,8 @@ export class RelayServer {
   private appendChain: Promise<void> = Promise.resolve();
   private token?: string;
   private verify?: (env: Envelope) => { ok: boolean; reason?: string } | Promise<{ ok: boolean; reason?: string }>;
+  private authenticate?: (hello: { id?: string; cursor?: string | null; sig?: string }) => ConnBinding | null;
+  private bindings = new Map<WebSocket, ConnBinding>();
 
   constructor(o: RelayOpts) {
     this.wantPort = o.port;
@@ -43,6 +52,17 @@ export class RelayServer {
   /** Install an authorization gate: a publish that fails it is dropped (never logged or broadcast). */
   onVerify(fn: (env: Envelope) => { ok: boolean; reason?: string } | Promise<{ ok: boolean; reason?: string }>) {
     this.verify = fn;
+  }
+
+  /**
+   * Turn on SCOPED ROUTING. With this set, a connection must authenticate its `hello`
+   * (returning its id + zones); thereafter the relay delivers each envelope only to the
+   * connections that should receive it (directed → that agent; zone topic → zone members;
+   * "*"/global → everyone) instead of broadcasting to all. Without it, the relay
+   * broadcasts to every client (legacy behavior) and clients filter locally.
+   */
+  onAuthenticate(fn: (hello: { id?: string; cursor?: string | null; sig?: string }) => ConnBinding | null) {
+    this.authenticate = fn;
   }
 
   port(): number {
@@ -77,17 +97,50 @@ export class RelayServer {
     }
     this.clients.add(ws);
     ws.on("message", (data) => {
-      let msg: { t?: string; cursor?: string | null; env?: Envelope };
+      let msg: { t?: string; cursor?: string | null; env?: Envelope; id?: string; sig?: string };
       try {
         msg = JSON.parse(data.toString());
       } catch {
         return;
       }
-      if (msg.t === "hello") void this.replay(ws, msg.cursor ?? null);
+      if (msg.t === "hello") void this.onHello(ws, msg);
       else if (msg.t === "pub" && msg.env) void this.handlePub(ws, msg.env);
     });
-    ws.on("close", () => this.clients.delete(ws));
-    ws.on("error", () => this.clients.delete(ws));
+    const drop = () => {
+      this.clients.delete(ws);
+      this.bindings.delete(ws);
+    };
+    ws.on("close", drop);
+    ws.on("error", drop);
+  }
+
+  private async onHello(ws: WebSocket, msg: { id?: string; cursor?: string | null; sig?: string }) {
+    if (this.authenticate) {
+      const binding = this.authenticate(msg);
+      if (!binding) {
+        sendFrame(ws, { t: "err", reason: "connection authentication failed" });
+        ws.close(1008, "unauthorized");
+        return;
+      }
+      this.bindings.set(ws, binding);
+    }
+    await this.replay(ws, msg.cursor ?? null);
+  }
+
+  /** Scoped routing: should this connection receive this envelope? */
+  private routeOk(ws: WebSocket, env: Envelope): boolean {
+    if (!this.authenticate) return true; // legacy: broadcast to all, clients filter locally
+    const b = this.bindings.get(ws);
+    if (!b) return false; // unauthenticated socket in scoped mode receives nothing
+    if (b.wildcard) return true; // the hub / control plane sees everything
+    if (env.to === "*") return true; // global broadcast
+    if (!Array.isArray(env.to)) return false;
+    if (env.to.includes(b.id)) return true; // directed to this agent
+    if (env.to.some((t) => t.startsWith("topic://"))) {
+      // un-zoned topic = global topic (everyone); zone-scoped topic = members only
+      return env.zone == null || b.zones.includes(env.zone);
+    }
+    return false;
   }
 
   private async replay(ws: WebSocket, cursor: string | null) {
@@ -100,7 +153,7 @@ export class RelayServer {
       if (i <= from || !line.trim()) continue;
       try {
         const env = JSON.parse(line) as Envelope;
-        sendFrame(ws, { t: "env", env, cursor: String(i) });
+        if (this.routeOk(ws, env)) sendFrame(ws, { t: "env", env, cursor: String(i) });
       } catch {
         /* skip corrupt line */
       }
@@ -125,7 +178,7 @@ export class RelayServer {
       await fs.appendFile(this.logFile, JSON.stringify(env) + "\n");
       this.count++;
       const frame = { t: "env" as const, env, cursor: String(this.count) };
-      for (const c of this.clients) if (c.readyState === c.OPEN) sendFrame(c, frame);
+      for (const c of this.clients) if (c.readyState === c.OPEN && this.routeOk(c, env)) sendFrame(c, frame);
     });
     return this.appendChain;
   }
