@@ -17,10 +17,14 @@ export interface Transport {
   /** Replay history strictly after `fromCursor` via the handler, then stream live. */
   start(fromCursor: string | null): Promise<void>;
   stop(): Promise<void>;
-  publish(env: Envelope): Promise<void>;
+  /** Publish an envelope. `wantAck` asks the server to positively confirm acceptance via onAck
+   *  (used by board claims so a worker runs only when it is the CONFIRMED owner, not on a timer). */
+  publish(env: Envelope, wantAck?: boolean): Promise<void>;
   /** Register the single sink. Each delivered envelope carries the new cursor. */
   onEnvelope(handler: (env: Envelope, cursor: string | null) => void): void;
   /** Optional: notified when the server REJECTS one of our published envelopes (by its id),
    *  so optimistic local state (e.g. a board claim the server didn't accept) can be undone. */
   onReject?(handler: (id: string, reason: string) => void): void;
+  /** Optional: notified when the server positively ACCEPTS a wantAck publish (by its id). */
+  onAck?(handler: (id: string) => void): void;
 }

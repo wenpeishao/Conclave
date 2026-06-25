@@ -53,6 +53,7 @@ export class NodeHost {
   private roster = new Map<string, RosterEntry>();
   private handlers: MsgHandler[] = [];
   private rejectHandlers: ((id: string) => void)[] = [];
+  private ackHandlers: ((id: string) => void)[] = [];
   private hbTimer: ReturnType<typeof setInterval> | null = null;
   private saveChain: Promise<void> = Promise.resolve();
   private saveCounter = 0;
@@ -78,6 +79,11 @@ export class NodeHost {
     this.rejectHandlers.push(h);
   }
 
+  /** Register a sink notified when the server positively ACKed one of OUR publishes (by id). */
+  onAck(h: (id: string) => void) {
+    this.ackHandlers.push(h);
+  }
+
   /** Known agents and whether they are currently online (heartbeat within 3 beats). */
   getRoster(): (AgentCard & { online: boolean })[] {
     const now = Date.now();
@@ -89,6 +95,12 @@ export class NodeHost {
 
   subscribe(topic: string) {
     this.topics.add(topic);
+  }
+
+  /** True in secure mode (this host signs + the server enforces/acks) → board claims are
+   *  ack-confirmed rather than best-effort min-ULID. */
+  get secure(): boolean {
+    return !!this.identity;
   }
 
   /** Update this agent's advertised availability and re-announce it on the global roster. */
@@ -107,6 +119,9 @@ export class NodeHost {
     });
     this.t.onReject?.((id) => {
       for (const cb of this.rejectHandlers) cb(id);
+    });
+    this.t.onAck?.((id) => {
+      for (const cb of this.ackHandlers) cb(id);
     });
     await this.t.start(this.cursor);
     await this.announce();
@@ -133,6 +148,7 @@ export class NodeHost {
       artifacts?: Artifact[];
       zone?: string; // override the host's default zone (must be one the agent belongs to);
       // lets a MULTI-ZONE agent answer into the right zone instead of always its first zone
+      wantAck?: boolean; // ask the server to positively confirm acceptance (→ onAck)
     } = {},
   ): Promise<Envelope> {
     let env = makeEnvelope({ from: this.card.id, to, seq: ++this.seq, ...opts });
@@ -142,7 +158,7 @@ export class NodeHost {
     this.markSeen(env.id); // never deliver our own message back to ourselves
     await this.append("outbound.ndjson", env);
     this.scheduleSave();
-    await this.t.publish(env);
+    await this.t.publish(env, opts.wantAck);
     return env;
   }
 
@@ -187,7 +203,8 @@ export class NodeHost {
       from: this.card.id,
       to: ["topic://presence"],
       kind: "presence",
-      body: this.card,
+      body: { ...this.card }, // SNAPSHOT — never sign a live reference (setStatus mutates the card;
+      // a queued presence beat flushed after a status change would otherwise fail verification)
     });
     if (this.identity) env = signEnvelope(env, this.identity.privateKey);
     try {

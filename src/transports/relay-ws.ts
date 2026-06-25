@@ -17,6 +17,7 @@ export class RelayWSTransport implements Transport {
   private ws: WebSocket | null = null;
   private handler: ((e: Envelope, c: string | null) => void) | null = null;
   private rejectHandler: ((id: string, reason: string) => void) | null = null;
+  private ackHandler: ((id: string) => void) | null = null;
   private cursor: string | null = null;
   private outQ: Envelope[] = [];
   private open = false;
@@ -40,6 +41,10 @@ export class RelayWSTransport implements Transport {
 
   onReject(h: (id: string, reason: string) => void) {
     this.rejectHandler = h;
+  }
+
+  onAck(h: (id: string) => void) {
+    this.ackHandler = h;
   }
 
   async start(cursor: string | null): Promise<void> {
@@ -84,6 +89,8 @@ export class RelayWSTransport implements Transport {
         } else if (m.t === "err") {
           console.error(`[conclave] relay rejected a message: ${m.reason ?? "unauthorized"}`);
           if (m.id) this.rejectHandler?.(m.id, m.reason ?? "rejected");
+        } else if (m.t === "ack" && m.id) {
+          this.ackHandler?.(m.id);
         }
       });
       ws.on("close", () => {
@@ -116,8 +123,8 @@ export class RelayWSTransport implements Transport {
     ws?.close();
   }
 
-  async publish(env: Envelope): Promise<void> {
-    if (this.open && this.ws) this.ws.send(JSON.stringify({ t: "pub", env }));
+  async publish(env: Envelope, wantAck?: boolean): Promise<void> {
+    if (this.open && this.ws) this.ws.send(JSON.stringify({ t: "pub", env, ack: wantAck || undefined }));
     else this.outQ.push(env);
   }
 }

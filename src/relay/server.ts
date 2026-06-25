@@ -143,14 +143,14 @@ export class RelayServer {
       sendFrame(ws, { t: "challenge", nonce });
     }
     ws.on("message", (data) => {
-      let msg: { t?: string; cursor?: string | null; env?: Envelope; id?: string; nonce?: string; sig?: string };
+      let msg: { t?: string; cursor?: string | null; env?: Envelope; id?: string; nonce?: string; sig?: string; ack?: boolean };
       try {
         msg = JSON.parse(data.toString());
       } catch {
         return;
       }
       if (msg.t === "hello") void this.onHello(ws, msg);
-      else if (msg.t === "pub" && msg.env) void this.handlePub(ws, msg.env);
+      else if (msg.t === "pub" && msg.env) void this.handlePub(ws, msg.env, msg.ack === true);
     });
     const drop = () => {
       this.clients.delete(ws);
@@ -230,7 +230,7 @@ export class RelayServer {
     }
   }
 
-  private async handlePub(ws: WebSocket, env: Envelope): Promise<void> {
+  private async handlePub(ws: WebSocket, env: Envelope, wantAck = false): Promise<void> {
     // Per-connection rate limit, checked BEFORE the expensive signature verify, so a flood of
     // bogus frames can't pin the CPU (asymmetric-work DoS).
     const now0 = Date.now();
@@ -271,6 +271,10 @@ export class RelayServer {
       }
     }
     await this.publish(env);
+    // Positive ACK so a claimer knows it is the CONFIRMED owner. Only in authorized (secure)
+    // mode, where exactly one claim per task is accepted — in legacy mode there is no such
+    // server-side exclusivity, so we send no ack and the board falls back to min-ULID.
+    if (wantAck && this.verify) sendFrame(ws, { t: "ack", id: env.id });
   }
 
   private markRecent(id: string) {
@@ -298,6 +302,7 @@ export class RelayServer {
 type ServerFrame =
   | { t: "env"; env: Envelope; cursor: string }
   | { t: "challenge"; nonce: string }
+  | { t: "ack"; id: string }
   | { t: "err"; reason: string; id?: string };
 
 function sendFrame(ws: WebSocket, frame: ServerFrame) {

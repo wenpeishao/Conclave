@@ -202,6 +202,10 @@ export class ConclaveServer {
         if (!owner) return { ok: false, reason: "done before any claim" };
         if (owner !== env.from) return { ok: false, reason: "only the claiming agent may complete a task" };
         this.claimedTasks.delete(op.id); // task finished → release the lock + bound the map
+      } else if (op.op === "release") {
+        // Only the hub releases (on revoke); the hub bypasses this branch above. A non-hub
+        // agent must not be able to un-claim another agent's task.
+        return { ok: false, reason: "release is server-only" };
       }
     }
     return { ok: true };
@@ -326,9 +330,14 @@ export class ConclaveServer {
         const name = String(body.name ?? "");
         const ok = this.registry.revoke(name);
         if (ok) {
-          // Free any tasks the revoked agent was holding, so they can be re-claimed (liveness).
+          // Free any tasks the revoked agent was holding so they can be re-claimed (liveness):
+          // clear the in-memory ownership AND emit a board `release` (the durable claim event
+          // would otherwise keep the task pinned to the revoked agent via min-ULID).
           const id = name.startsWith("agent://") ? name : `agent://${name}`;
           for (const [tid, owner] of this.claimedTasks) if (owner === id) this.claimedTasks.delete(tid);
+          for (const t of this.board.list()) {
+            if (t.claimedBy === id && t.status === "claimed") void this.board.release(t.id);
+          }
         }
         return send(ok ? 200 : 404, ok ? { revoked: true } : { error: "agent not found" });
       }

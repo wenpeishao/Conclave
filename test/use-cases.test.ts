@@ -151,7 +151,7 @@ test("use case: exactly-once under claim contention (no double-execution)", asyn
   // Regression: under contention with a short settle, server-rejected (losing) claims must NOT
   // make a worker run the task — the client now honours the relay's rejection (un-applies it).
   const { server, base, wsUrl } = await secureServer();
-  const N = 8;
+  const N = 16; // the scale at which the timer-based fix failed (~11x executions); ack-based holds
   let executions = 0;
   const countBrain = (): Brain => ({
     react: async (ctx) => {
@@ -167,7 +167,7 @@ test("use case: exactly-once under claim contention (no double-execution)", asyn
   for (let i = 0; i < N; i++) {
     const id = await enroll(base, `w${i}`, "w", ["s-scale"]);
     const h = await mkHost(wsUrl, id, "s-scale");
-    workers.push(new TeamWorker(h, new TaskBoard(h), countBrain(), { pollMs: 25, settleMs: 120, role: "w" }));
+    workers.push(new TeamWorker(h, new TaskBoard(h), countBrain(), { pollMs: 25, settleMs: 80, role: "w" }));
   }
   await Promise.all(workers.map((w) => w.start()));
   await hLead.start();
@@ -179,6 +179,43 @@ test("use case: exactly-once under claim contention (no double-execution)", asyn
   assert.equal(executions, N, `each task executed exactly once (got ${executions} executions for ${N} tasks)`);
 
   await Promise.all(workers.map((w) => w.stop()));
+  await hLead.stop();
+  await server.stop();
+});
+
+test("use case: revoking a worker frees its claimed task for re-claim", async () => {
+  const { server, base, wsUrl } = await secureServer();
+  const wa = await enroll(base, "wa", "w", ["s"]);
+  const wb = await enroll(base, "wb", "w", ["s"]);
+  const lead = await enroll(base, "lead", "lead", ["s"]);
+  const hLead = await mkHost(wsUrl, lead, "s");
+  const bLead = new TaskBoard(hLead);
+  const hA = await mkHost(wsUrl, wa, "s");
+  const bA = new TaskBoard(hA);
+  await hA.start();
+  await hLead.start();
+  await wait(200);
+
+  const taskId = await bLead.add("do work", { for: "w" });
+  await until(() => bA.open("w").some((t) => t.id === taskId), 4000);
+  const won = await bA.claimNext(120, "w");
+  assert.equal(won?.id, taskId, "worker A claimed the task");
+  await until(() => bLead.list().find((t) => t.id === taskId)?.claimedBy === "agent://wa", 4000);
+
+  // A "crashes" (never completes) and is revoked.
+  await hA.stop();
+  await fetch(`${base}/admin/revoke`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${AT}` }, body: JSON.stringify({ name: "wa" }) });
+
+  // The task must re-open (released) so worker B can claim and finish it.
+  await until(() => bLead.list().find((t) => t.id === taskId)?.status === "open", 4000);
+  const hB = await mkHost(wsUrl, wb, "s");
+  const bB = new TaskBoard(hB);
+  await hB.start();
+  await until(() => bB.open("w").some((t) => t.id === taskId), 4000);
+  const wonB = await bB.claimNext(120, "w");
+  assert.equal(wonB?.id, taskId, "worker B re-claimed the freed task after A was revoked");
+
+  await hB.stop();
   await hLead.stop();
   await server.stop();
 });

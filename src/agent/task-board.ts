@@ -19,7 +19,8 @@ export const TASKS_TOPIC = "topic://tasks";
 export type TaskOp =
   | { op: "add"; title: string; for?: string } // `for` = required role/capability (role routing)
   | { op: "claim"; id: string }
-  | { op: "done"; id: string; result?: string };
+  | { op: "done"; id: string; result?: string }
+  | { op: "release"; id: string }; // un-claim: voids claims/dones older than it (revoke / lease expiry)
 
 export interface BoardEvent {
   eid: string; // the envelope ULID (global, time-sortable) — the convergence key
@@ -40,7 +41,7 @@ export interface Task {
 export function isTaskOp(b: unknown): b is TaskOp {
   if (typeof b !== "object" || b === null) return false;
   const op = (b as { op?: unknown }).op;
-  return op === "add" || op === "claim" || op === "done";
+  return op === "add" || op === "claim" || op === "done" || op === "release";
 }
 
 const minBy = <T>(xs: T[], key: (x: T) => string): T =>
@@ -55,6 +56,7 @@ export function reduceBoard(events: BoardEvent[]): Task[] {
   const adds = new Map<string, { eid: string; from: string; title: string; for?: string }[]>();
   const claims = new Map<string, { eid: string; from: string }[]>();
   const dones = new Map<string, { eid: string; from: string; result?: string }[]>();
+  const releases = new Map<string, string[]>(); // task id → release eids
   const push = <T>(m: Map<string, T[]>, id: string, v: T) => {
     const arr = m.get(id);
     if (arr) arr.push(v);
@@ -65,15 +67,19 @@ export function reduceBoard(events: BoardEvent[]): Task[] {
     if (op.op === "add") push(adds, eid, { eid, from, title: op.title, for: op.for }); // task id = add envelope id
     else if (op.op === "claim") push(claims, op.id, { eid, from });
     else if (op.op === "done") push(dones, op.id, { eid, from, result: op.result });
+    else if (op.op === "release") push(releases, op.id, eid);
   }
 
   const tasks: Task[] = [];
   for (const [id, addList] of adds) {
     const add = minBy(addList, (x) => x.eid);
-    const claimList = claims.get(id);
-    const doneList = dones.get(id);
-    const claim = claimList ? minBy(claimList, (x) => x.eid) : null;
-    const done = doneList ? minBy(doneList, (x) => x.eid) : null;
+    // A release voids any claim/done with an OLDER ULID, so the task re-opens and a newer claim
+    // (after the release) takes over. No release → "" → everything is valid (original behavior).
+    const lastRelease = (releases.get(id) ?? []).reduce((a, b) => (b > a ? b : a), "");
+    const claimList = (claims.get(id) ?? []).filter((c) => c.eid > lastRelease);
+    const doneList = (dones.get(id) ?? []).filter((d) => d.eid > lastRelease);
+    const claim = claimList.length ? minBy(claimList, (x) => x.eid) : null;
+    const done = doneList.length ? minBy(doneList, (x) => x.eid) : null;
     tasks.push({
       id,
       title: add.title,
@@ -101,10 +107,21 @@ export class TaskBoard {
         this.record(e.id, e.from, e.body);
       }
     });
-    // If the server REJECTS one of our ops (e.g. a claim it didn't accept — first-claim-wins
-    // means a loser is rejected), undo the optimistic local record so we don't act as owner.
-    host.onReject((id) => this.unrecord(id));
+    // Claim resolution: the server positively ACKs an accepted claim and REJECTS (err) a loser
+    // (first-claim-wins). We resolve the pending claim either way — and undo the optimistic local
+    // record on rejection — so a worker runs only when it is the CONFIRMED owner, not on a timer.
+    host.onAck((id) => {
+      this.pendingClaims.get(id)?.("won");
+      this.pendingClaims.delete(id);
+    });
+    host.onReject((id) => {
+      this.unrecord(id);
+      this.pendingClaims.get(id)?.("lost");
+      this.pendingClaims.delete(id);
+    });
   }
+
+  private pendingClaims = new Map<string, (v: "won" | "lost" | "timeout") => void>();
 
   private record(eid: string, from: string, op: TaskOp) {
     if (this.seen.has(eid)) return; // idempotent (a redelivery can't double-apply)
@@ -147,6 +164,11 @@ export class TaskBoard {
     await this.publish(result === undefined ? { op: "done", id } : { op: "done", id, result });
   }
 
+  /** Un-claim a task so another worker can re-claim it (e.g. its claimer was revoked). */
+  async release(id: string): Promise<void> {
+    await this.publish({ op: "release", id });
+  }
+
   list(): Task[] {
     return reduceBoard(this.events);
   }
@@ -155,24 +177,38 @@ export class TaskBoard {
     return this.list().filter((t) => t.status === "open" && (!t.for || t.for === role));
   }
   /**
-   * Claim the earliest open task and return it if WE won the claim, else null.
+   * Claim the earliest open task and return it ONLY if we are the confirmed owner, else null.
    *
-   * Claiming is advisory under concurrency: the bus is eventually consistent, so a
-   * competing claim with a smaller ULID can still arrive later and flip ownership. We
-   * verify against the current local view (catching a competitor whose claim already
-   * arrived) but a caller about to do irreversible work should re-check `claimedBy ===
-   * its own id` after a short settle, or treat the claim as a hint, not a lock.
+   * In secure mode the server enforces first-claim-wins and positively ACKs the accepted claim
+   * (rejecting losers), so we wait for that verdict — exactly-once holds regardless of contention
+   * or timing. Against a legacy relay that doesn't ack, we fall back to the min-ULID local view
+   * after `settleMs` (best-effort; treat the claim as a hint there).
    */
   async claimNext(settleMs = 0, role?: string): Promise<Task | null> {
     const next = this.open(role)[0];
     if (!next) return null;
-    await this.claim(next.id);
-    // Wait for competing claims from other devices to propagate, then confirm we won the
-    // min-ULID tie-break. With settleMs > cross-device latency this reliably prevents two
-    // machines from both working the same task.
-    if (settleMs > 0) await new Promise((r) => setTimeout(r, settleMs));
-    const after = this.list().find((t) => t.id === next.id);
-    return after?.claimedBy === this.host.card.id ? after : null;
+
+    // Legacy (no secure server / no acks): best-effort optimistic claim + min-ULID settle.
+    if (!this.host.secure) {
+      await this.claim(next.id);
+      if (settleMs > 0) await new Promise((r) => setTimeout(r, settleMs));
+      const after = this.list().find((t) => t.id === next.id);
+      return after?.claimedBy === this.host.card.id ? after : null;
+    }
+
+    // Secure: publish asking the server to positively confirm acceptance, and wait for the
+    // verdict (ack=won, reject=lost). Exactly-once holds regardless of contention/timing.
+    const env = await this.host.send([TASKS_TOPIC], { kind: "event", subject: "task", body: { op: "claim", id: next.id }, wantAck: true });
+    this.record(env.id, env.from, { op: "claim", id: next.id }); // optimistic; undone if rejected
+    const verdict = await new Promise<"won" | "lost" | "timeout">((resolve) => {
+      this.pendingClaims.set(env.id, resolve);
+      setTimeout(() => {
+        if (this.pendingClaims.delete(env.id)) resolve("timeout");
+      }, Math.max(settleMs, 2500));
+    });
+    // Only run when positively confirmed the owner; a timeout (the server would have answered)
+    // is treated as not-owned to avoid double-execution.
+    return verdict === "won" ? (this.list().find((t) => t.id === next.id) ?? next) : null;
   }
   onChange(cb: (board: Task[]) => void): void {
     this.listeners.push(cb);
