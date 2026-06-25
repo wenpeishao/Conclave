@@ -4,7 +4,7 @@ import { ConclaveServer } from "../src/server/conclave-server.js";
 import { NodeHost } from "../src/node/host.js";
 import { RelayWSTransport } from "../src/transports/relay-ws.js";
 import { TaskBoard } from "../src/agent/task-board.js";
-import { generateIdentity } from "../src/core/identity.js";
+import { generateIdentity, signData } from "../src/core/identity.js";
 import { tmpDir, until, wait } from "./helpers.js";
 
 const CT = "connect-token";
@@ -34,7 +34,7 @@ test("secure mode: only enrolled+signed agents can act; forged/unsigned/revoked 
   const enr = await fetch(`${base}/enroll`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${CT}` },
-    body: JSON.stringify({ token: inv.enrollToken, publicKey: coder.publicKey }),
+    body: JSON.stringify({ token: inv.enrollToken, publicKey: coder.publicKey, proof: signData(coder.privateKey, inv.enrollToken) }),
   });
   assert.equal(enr.status, 200);
 

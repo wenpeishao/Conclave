@@ -40,8 +40,12 @@ export class RelayServer {
   private appendChain: Promise<void> = Promise.resolve();
   private token?: string;
   private verify?: (env: Envelope) => { ok: boolean; reason?: string } | Promise<{ ok: boolean; reason?: string }>;
-  private authenticate?: (hello: { id?: string; cursor?: string | null; sig?: string }) => ConnBinding | null;
+  private replayVerify?: (env: Envelope) => boolean;
+  private authenticate?: (hello: { id?: string; cursor?: string | null; ts?: string; sig?: string }) => ConnBinding | null;
   private bindings = new Map<WebSocket, ConnBinding>();
+  private recentIds = new Set<string>(); // anti-replay: ids already accepted
+  private recentOrder: string[] = [];
+  private freshnessMs = 600000; // ±10 min clock window for accepting an envelope
 
   constructor(o: RelayOpts) {
     this.wantPort = o.port;
@@ -61,8 +65,14 @@ export class RelayServer {
    * "*"/global → everyone) instead of broadcasting to all. Without it, the relay
    * broadcasts to every client (legacy behavior) and clients filter locally.
    */
-  onAuthenticate(fn: (hello: { id?: string; cursor?: string | null; sig?: string }) => ConnBinding | null) {
+  onAuthenticate(fn: (hello: { id?: string; cursor?: string | null; ts?: string; sig?: string }) => ConnBinding | null) {
     this.authenticate = fn;
+  }
+
+  /** Re-verify each stored line before replaying it, so a forged/unsigned historical line is
+   *  never served as authentic to a (re)connecting client. */
+  onReplayVerify(fn: (env: Envelope) => boolean) {
+    this.replayVerify = fn;
   }
 
   port(): number {
@@ -73,7 +83,7 @@ export class RelayServer {
   async start(): Promise<void> {
     await fs.mkdir(path.dirname(this.logFile), { recursive: true });
     this.count = await countLines(this.logFile);
-    this.wss = new WebSocketServer({ port: this.wantPort });
+    this.wss = new WebSocketServer({ port: this.wantPort, maxPayload: 512 * 1024 });
     this.wss.on("connection", (ws, req) => this.onConn(ws, req));
     await new Promise<void>((resolve, reject) => {
       this.wss!.once("listening", () => resolve());
@@ -97,7 +107,7 @@ export class RelayServer {
     }
     this.clients.add(ws);
     ws.on("message", (data) => {
-      let msg: { t?: string; cursor?: string | null; env?: Envelope; id?: string; sig?: string };
+      let msg: { t?: string; cursor?: string | null; env?: Envelope; id?: string; ts?: string; sig?: string };
       try {
         msg = JSON.parse(data.toString());
       } catch {
@@ -114,7 +124,7 @@ export class RelayServer {
     ws.on("error", drop);
   }
 
-  private async onHello(ws: WebSocket, msg: { id?: string; cursor?: string | null; sig?: string }) {
+  private async onHello(ws: WebSocket, msg: { id?: string; cursor?: string | null; ts?: string; sig?: string }) {
     if (this.authenticate) {
       const binding = this.authenticate(msg);
       if (!binding) {
@@ -153,6 +163,7 @@ export class RelayServer {
       if (i <= from || !line.trim()) continue;
       try {
         const env = JSON.parse(line) as Envelope;
+        if (this.replayVerify && !this.replayVerify(env)) continue; // don't serve forged history
         if (this.routeOk(ws, env)) sendFrame(ws, { t: "env", env, cursor: String(i) });
       } catch {
         /* skip corrupt line */
@@ -161,15 +172,36 @@ export class RelayServer {
   }
 
   private async handlePub(ws: WebSocket, env: Envelope): Promise<void> {
+    // Freshness: reject envelopes whose timestamp is far outside the clock window. This bounds
+    // how long a captured signed envelope can be replayed for.
+    const ts = Date.parse(env.ts);
+    if (Number.isFinite(ts) && Math.abs(Date.now() - ts) > this.freshnessMs) {
+      sendFrame(ws, { t: "err", reason: "stale envelope (outside freshness window)", id: env.id });
+      return;
+    }
+    // Replay: an id we've already accepted cannot be re-published (verbatim replay defense).
+    if (this.recentIds.has(env.id)) {
+      sendFrame(ws, { t: "err", reason: "duplicate envelope id", id: env.id });
+      return;
+    }
     if (this.verify) {
       const v = await this.verify(env);
       if (!v.ok) {
-        // Tell the sender its message was rejected, then drop it.
         sendFrame(ws, { t: "err", reason: v.reason ?? "unauthorized", id: env.id });
         return;
       }
     }
+    this.markRecent(env.id);
     await this.publish(env);
+  }
+
+  private markRecent(id: string) {
+    this.recentIds.add(id);
+    this.recentOrder.push(id);
+    if (this.recentOrder.length > 50000) {
+      const old = this.recentOrder.shift();
+      if (old) this.recentIds.delete(old);
+    }
   }
 
   private publish(env: Envelope): Promise<void> {

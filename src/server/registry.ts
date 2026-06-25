@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import { verifyEnvelope, randomToken } from "../core/identity.js";
+import { verifyEnvelope, verifyData, isValidPublicKey, randomToken } from "../core/identity.js";
 import type { Envelope } from "../core/types.js";
 
 /**
@@ -84,8 +84,12 @@ export class AgentRegistry {
     return p;
   }
 
-  /** Device: redeem an enrollment token by registering a public key. One-time. */
-  enroll(token: string, publicKey: string, now = Date.now()): AgentRecord {
+  /**
+   * Device: redeem an enrollment token by registering a public key. One-time.
+   * `proof` (signData(privateKey, token)) proves the redeemer actually holds the private key
+   * for `publicKey` — required so a key cannot be enrolled by someone who doesn't control it.
+   */
+  enroll(token: string, publicKey: string, proof?: string, now = Date.now()): AgentRecord {
     const p = this.pending.get(token);
     if (!p) throw new Error("invalid or already-used enrollment token");
     if (now > p.expTs) {
@@ -93,6 +97,10 @@ export class AgentRegistry {
       void this.save();
       throw new Error("enrollment token expired");
     }
+    if (!isValidPublicKey(publicKey)) throw new Error("publicKey is not a valid ed25519 key");
+    if (!proof || !verifyData(publicKey, token, proof)) throw new Error("missing or invalid proof-of-possession");
+    const existing = this.agents.get(p.id);
+    if (existing?.revoked) throw new Error(`${p.id} is revoked; admin must rotate it before re-enrollment`);
     const rec: AgentRecord = {
       id: p.id,
       name: p.name,
@@ -114,6 +122,9 @@ export class AgentRegistry {
     const rec = this.agents.get(id);
     if (!rec) return false;
     rec.revoked = true;
+    // Also burn any still-pending enrollment tokens for this name, so revocation can't be
+    // undone by redeeming an outstanding token onto a fresh key.
+    for (const [tok, p] of this.pending) if (p.id === id) this.pending.delete(tok);
     void this.save();
     return true;
   }

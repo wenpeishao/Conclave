@@ -9,7 +9,7 @@ import { RelayWSTransport } from "../transports/relay-ws.js";
 import { TaskBoard, isTaskOp, type Task } from "../agent/task-board.js";
 import type { Envelope, AgentCard } from "../core/types.js";
 import { AgentRegistry } from "./registry.js";
-import { generateIdentity, verifyData, type Identity } from "../core/identity.js";
+import { generateIdentity, verifyData, signData, type Identity } from "../core/identity.js";
 
 /**
  * ConclaveServer — a deployable coordination backend. One process, three jobs:
@@ -92,7 +92,7 @@ export class ConclaveServer {
       // Trust the hub's own key so its presence/board envelopes pass verification.
       if (!this.registry.get(this.hubIdentity.id)) {
         const inv = this.registry.invite({ name: "hub", role: "server", canRun: true });
-        this.registry.enroll(inv.token, this.hubIdentity.publicKey);
+        this.registry.enroll(inv.token, this.hubIdentity.publicKey, signData(this.hubIdentity.privateKey, inv.token));
       }
       // Gate every publish: valid signature from a known agent (identity) AND the action is
       // allowed for that agent's role/zone (policy). The registry record is consumed here,
@@ -101,6 +101,8 @@ export class ConclaveServer {
       // Bind each connection to its authenticated identity + zones → scoped routing
       // (directed/zone/global) instead of broadcast-to-all.
       this.relay.onAuthenticate((hello) => this.authenticateConn(hello));
+      // Never replay a forged/unsigned historical line as authentic (e.g. a legacy log).
+      this.relay.onReplayVerify((env) => this.registry!.authorize(env).ok);
     }
 
     await this.relay.start();
@@ -175,12 +177,14 @@ export class ConclaveServer {
     return { ok: true };
   }
 
-  /** Authenticate a connection's signed hello → its routing binding (id + zones), or null. */
-  private authenticateConn(hello: { id?: string; cursor?: string | null; sig?: string }): ConnBinding | null {
+  /** Authenticate a connection's signed, timestamped hello → its routing binding, or null. */
+  private authenticateConn(hello: { id?: string; cursor?: string | null; ts?: string; sig?: string }): ConnBinding | null {
     if (!hello.id || !hello.sig) return null;
+    const t = Date.parse(hello.ts ?? "");
+    if (!Number.isFinite(t) || Math.abs(Date.now() - t) > 600000) return null; // freshness → bounds hello replay
     const rec = this.registry!.get(hello.id);
     if (!rec || rec.revoked) return null;
-    if (!verifyData(rec.publicKey, { id: hello.id, cursor: hello.cursor ?? null }, hello.sig)) return null;
+    if (!verifyData(rec.publicKey, { id: hello.id, cursor: hello.cursor ?? null, ts: hello.ts }, hello.sig)) return null;
     return { id: hello.id, zones: rec.zones ?? [], wildcard: hello.id === this.hubIdentity?.id };
   }
 
@@ -239,9 +243,10 @@ export class ConclaveServer {
       const body = await readJson(req);
       const token = String(body.token ?? "");
       const publicKey = String(body.publicKey ?? "");
+      const proof = body.proof ? String(body.proof) : undefined;
       if (!token || !publicKey) return send(400, { error: "token and publicKey required" });
       try {
-        const rec = this.registry.enroll(token, publicKey);
+        const rec = this.registry.enroll(token, publicKey, proof);
         return send(200, { id: rec.id, name: rec.name, role: rec.role, canRun: rec.canRun, zones: rec.zones });
       } catch (e) {
         return send(400, { error: (e as Error).message });
@@ -338,7 +343,7 @@ export class ConclaveServer {
 
     // blobs (data exchange) — content-addressed by sha256
     if (req.method === "POST" && p === "/blobs") {
-      const buf = await readBody(req);
+      const buf = await readBody(req, 64 * 1024 * 1024); // blobs are the data path — allow up to 64 MiB
       const sha = createHash("sha256").update(buf).digest("hex");
       await fs.writeFile(path.join(this.blobsDir, sha), buf);
       return send(200, { sha256: sha, size: buf.length, uri: `conclave://blobs/${sha}` });
@@ -440,6 +445,8 @@ export class ConclaveServer {
       if (i <= since) continue;
       try {
         const e = JSON.parse(line) as Envelope;
+        // In secure mode, only surface authentically-signed history (never forged log lines).
+        if (this.registry && !this.registry.authorize(e).ok) continue;
         if (e.kind === "message" || e.kind === "response" || e.kind === "request" || e.kind === "event") out.push(e);
       } catch {
         /* skip */
@@ -453,17 +460,28 @@ export class ConclaveServer {
   }
 }
 
-function readBody(req: http.IncomingMessage): Promise<Buffer> {
+// Bounded body read: aborts once the cumulative size exceeds `maxBytes`, so a single huge
+// request can't OOM the process (the JSON endpoints stay small; /blobs gets a larger cap).
+function readBody(req: http.IncomingMessage, maxBytes = 1024 * 1024): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (c) => chunks.push(Buffer.from(c)));
+    let total = 0;
+    req.on("data", (c) => {
+      total += c.length;
+      if (total > maxBytes) {
+        reject(new Error(`request body exceeds ${maxBytes} bytes`));
+        req.destroy();
+        return;
+      }
+      chunks.push(Buffer.from(c));
+    });
     req.on("end", () => resolve(Buffer.concat(chunks)));
     req.on("error", reject);
   });
 }
 
 async function readJson(req: http.IncomingMessage): Promise<Record<string, unknown>> {
-  const buf = await readBody(req);
+  const buf = await readBody(req, 256 * 1024);
   if (!buf.length) return {};
   return JSON.parse(buf.toString()) as Record<string, unknown>;
 }

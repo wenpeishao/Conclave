@@ -1,9 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AgentRegistry } from "../src/server/registry.js";
-import { generateIdentity, signEnvelope } from "../src/core/identity.js";
+import { generateIdentity, signEnvelope, signData } from "../src/core/identity.js";
 import { makeEnvelope } from "../src/core/envelope.js";
 import { tmpDir } from "./helpers.js";
+
+// Enrollment now requires proof-of-possession: a signature over the token by the new key.
+const pop = (privateKey: string, token: string) => signData(privateKey, token);
 
 test("registry: invite -> enroll -> authorize signed envelope", async () => {
   const reg = new AgentRegistry(await tmpDir());
@@ -15,7 +18,7 @@ test("registry: invite -> enroll -> authorize signed envelope", async () => {
 
   // Device generates its own keypair, enrolls its public key.
   const id = generateIdentity("coder");
-  const rec = reg.enroll(inv.token, id.publicKey);
+  const rec = reg.enroll(inv.token, id.publicKey, pop(id.privateKey, inv.token));
   assert.equal(rec.id, "agent://coder");
   assert.equal(rec.role, "coder");
 
@@ -29,7 +32,8 @@ test("registry: forgery, revocation, and unsigned are all rejected", async () =>
   await reg.load();
   const coder = generateIdentity("coder");
   const mallory = generateIdentity("mallory");
-  reg.enroll(reg.invite({ name: "coder" }).token, coder.publicKey);
+  const ct = reg.invite({ name: "coder" }).token;
+  reg.enroll(ct, coder.publicKey, pop(coder.privateKey, ct));
 
   // Forged: Mallory signs an envelope claiming to be coder.
   const forged = signEnvelope(makeEnvelope({ from: "agent://coder", to: "*", body: "evil" }), mallory.privateKey);
@@ -62,8 +66,41 @@ test("registry: enrollment tokens are one-time and expiring", async () => {
 
   // Fresh token works once, then is consumed.
   const inv = reg.invite({ name: "box" });
-  reg.enroll(inv.token, id.publicKey);
-  assert.throws(() => reg.enroll(inv.token, id.publicKey), /invalid or already-used/);
+  reg.enroll(inv.token, id.publicKey, pop(id.privateKey, inv.token));
+  assert.throws(() => reg.enroll(inv.token, id.publicKey, pop(id.privateKey, inv.token)), /invalid or already-used/);
+});
+
+test("registry: enroll requires proof-of-possession and a valid key", async () => {
+  const reg = new AgentRegistry(await tmpDir());
+  await reg.load();
+  const id = generateIdentity("dev");
+  const other = generateIdentity("other");
+
+  const inv = reg.invite({ name: "dev" });
+  // No proof → rejected.
+  assert.throws(() => reg.enroll(inv.token, id.publicKey), /proof-of-possession/);
+  // Proof signed by a DIFFERENT key (attacker enrolling a key they don't control) → rejected.
+  assert.throws(() => reg.enroll(inv.token, id.publicKey, pop(other.privateKey, inv.token)), /proof-of-possession/);
+  // Garbage key → rejected.
+  assert.throws(() => reg.enroll(inv.token, "not-a-key", pop(id.privateKey, inv.token)), /valid ed25519/);
+  // Correct proof → ok.
+  assert.ok(reg.enroll(inv.token, id.publicKey, pop(id.privateKey, inv.token)));
+});
+
+test("registry: revoke burns pending tokens so a leaked one can't resurrect the name", async () => {
+  const reg = new AgentRegistry(await tmpDir());
+  await reg.load();
+  const coder = generateIdentity("coder");
+  const attacker = generateIdentity("coder");
+
+  // Two tokens minted before enrollment (a duplicate / leaked invite).
+  const t1 = reg.invite({ name: "coder" }).token;
+  const t2 = reg.invite({ name: "coder" }).token;
+  reg.enroll(t1, coder.publicKey, pop(coder.privateKey, t1)); // coder enrolled; t2 still pending
+  assert.equal(reg.revoke("coder"), true); // revocation must also burn t2
+
+  // The still-pending leaked token can no longer resurrect the revoked name onto a new key.
+  assert.throws(() => reg.enroll(t2, attacker.publicKey, pop(attacker.privateKey, t2)), /invalid or already-used/);
 });
 
 test("registry: persists across reload", async () => {
@@ -71,7 +108,8 @@ test("registry: persists across reload", async () => {
   const reg1 = new AgentRegistry(dir);
   await reg1.load();
   const id = generateIdentity("home-gpu");
-  reg1.enroll(reg1.invite({ name: "home-gpu", role: "deploy", canRun: true }).token, id.publicKey);
+  const hgt = reg1.invite({ name: "home-gpu", role: "deploy", canRun: true }).token;
+  reg1.enroll(hgt, id.publicKey, pop(id.privateKey, hgt));
   await new Promise((r) => setTimeout(r, 50)); // let the async save flush
 
   const reg2 = new AgentRegistry(dir);

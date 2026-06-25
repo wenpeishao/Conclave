@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { ConclaveServer } from "../src/server/conclave-server.js";
 import { NodeHost } from "../src/node/host.js";
 import { RelayWSTransport } from "../src/transports/relay-ws.js";
-import { generateIdentity, type Identity } from "../src/core/identity.js";
+import { generateIdentity, signData, type Identity } from "../src/core/identity.js";
 import { tmpDir, wait } from "./helpers.js";
 
 const CT = "connect-token";
@@ -19,7 +19,7 @@ async function enroll(base: string, name: string, zones: string[]): Promise<Iden
   await fetch(`${base}/enroll`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${CT}` },
-    body: JSON.stringify({ token: inv.enrollToken, publicKey: id.publicKey }),
+    body: JSON.stringify({ token: inv.enrollToken, publicKey: id.publicKey, proof: signData(id.privateKey, inv.enrollToken) }),
   });
   return id;
 }

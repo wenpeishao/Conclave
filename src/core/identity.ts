@@ -90,3 +90,13 @@ export function verifyData(publicKeyB64: string, obj: unknown, sig: string): boo
     return false;
   }
 }
+
+/** True iff `publicKeyB64` is a well-formed ed25519 SPKI public key. */
+export function isValidPublicKey(publicKeyB64: string): boolean {
+  try {
+    const k = createPublicKey({ key: Buffer.from(publicKeyB64, "base64"), format: "der", type: "spki" });
+    return k.asymmetricKeyType === "ed25519";
+  } catch {
+    return false;
+  }
+}

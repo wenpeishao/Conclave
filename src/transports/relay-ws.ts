@@ -32,12 +32,14 @@ export class RelayWSTransport implements Transport {
     this.identity = identity;
   }
 
-  // A signed hello authenticates this connection to the relay so it can route by identity/zone.
+  // A signed, timestamped hello authenticates this connection to the relay so it can route
+  // by identity/zone. The timestamp bounds how long a captured hello can be replayed.
   private helloFrame(): object {
     const base = { t: "hello", cursor: this.cursor };
     if (!this.identity) return base;
-    const sig = signData(this.identity.privateKey, { id: this.identity.id, cursor: this.cursor });
-    return { ...base, id: this.identity.id, sig };
+    const ts = new Date().toISOString();
+    const sig = signData(this.identity.privateKey, { id: this.identity.id, cursor: this.cursor, ts });
+    return { ...base, id: this.identity.id, ts, sig };
   }
 
   onEnvelope(h: (e: Envelope, c: string | null) => void) {

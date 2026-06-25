@@ -8,7 +8,7 @@ import { NodeHost } from "./node/host.js";
 import { buildTransport, type TransportConfig } from "./node/build.js";
 import { AutonomousAgent } from "./agent/runtime.js";
 import { echoBrain } from "./agent/brains/rule.js";
-import { generateIdentity, type Identity } from "./core/identity.js";
+import { generateIdentity, signData, type Identity } from "./core/identity.js";
 import type { AgentCard, Envelope } from "./core/types.js";
 
 type Args = Record<string, string | boolean>;
@@ -312,10 +312,11 @@ async function cmdEnroll(a: Args) {
   const base = httpBase(a);
   const token = str(a, "token") || process.env.CONCLAVE_TOKEN;
   const ident = generateIdentity(name);
+  const proof = signData(ident.privateKey, enroll); // prove we hold the private key for this pubkey
   const res = await fetch(`${base}/enroll`, {
     method: "POST",
     headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
-    body: JSON.stringify({ token: enroll, publicKey: ident.publicKey }),
+    body: JSON.stringify({ token: enroll, publicKey: ident.publicKey, proof }),
   });
   const j = (await res.json()) as { id?: string; role?: string; canRun?: boolean; zones?: string[]; error?: string };
   if (!res.ok) throw new Error(`enroll failed: ${j.error ?? res.status}`);
