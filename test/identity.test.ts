@@ -49,6 +49,15 @@ test("identity: canonical JSON is key-order independent", () => {
   assert.equal(canonicalJSON({ x: { d: 1, c: 2 } }), '{"x":{"c":2,"d":1}}');
 });
 
+test("identity: signing survives a JSON round-trip with undefined-valued fields", () => {
+  // Regression: a body field set to undefined (e.g. AgentCard.capabilities) must sign+verify the
+  // same before and after JSON serialization (JSON drops undefined; canonicalJSON must too).
+  const id = generateIdentity("box");
+  const env = signEnvelope(makeEnvelope({ from: id.id, to: "*", body: { id: id.id, capabilities: undefined, status: "available" } }), id.privateKey);
+  const roundTripped = JSON.parse(JSON.stringify(env)); // what the relay actually receives
+  assert.equal(verifyEnvelope(roundTripped, id.publicKey), true, "verifies after the wire round-trip");
+});
+
 test("identity: unsigned envelope never verifies", () => {
   const id = generateIdentity("coder");
   const env = makeEnvelope({ from: id.id, to: "*", body: "no sig" });

@@ -42,7 +42,11 @@ export function canonicalJSON(v: unknown): string {
   if (v === null || typeof v !== "object") return JSON.stringify(v) ?? "null";
   if (Array.isArray(v)) return "[" + v.map(canonicalJSON).join(",") + "]";
   const o = v as Record<string, unknown>;
-  const keys = Object.keys(o).sort();
+  // Omit undefined-valued keys, matching JSON.stringify (which drops them) so the signer and a
+  // verifier reading the JSON-serialized envelope hash the SAME bytes.
+  const keys = Object.keys(o)
+    .filter((k) => o[k] !== undefined)
+    .sort();
   return "{" + keys.map((k) => JSON.stringify(k) + ":" + canonicalJSON(o[k])).join(",") + "}";
 }
 
