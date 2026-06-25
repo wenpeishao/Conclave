@@ -41,6 +41,11 @@ export class ConclaveServer {
   private dataDir: string;
   private wantHttpPort: number;
   private token?: string;
+  // Streaming relay rendezvous: a channel waits for its other half, then bytes pipe
+  // straight through (sender request body -> receiver response body). Nothing is stored.
+  private waitingRecv = new Map<string, http.ServerResponse>();
+  private waitingSend = new Map<string, { req: http.IncomingMessage; reply: (code: number) => void }>();
+  private relayWaitMs = 120000;
 
   constructor(o: ConclaveServerOpts) {
     this.dataDir = o.dataDir;
@@ -186,7 +191,77 @@ export class ConclaveServer {
       return send(200, { blobs: list });
     }
 
+    // STREAMING RELAY (data exchange, NOTHING STORED) — a rendezvous channel. The sender
+    // (PUT/POST /relay/:ch) and receiver (GET /relay/:ch) meet on a channel name; the
+    // server pipes the sender's body straight into the receiver's response (TCP backpressure,
+    // no disk, ~one chunk in memory). Whoever arrives first waits (up to relayWaitMs) for
+    // the other. Use this instead of /blobs when you don't want the server holding bytes.
+    const relayM = p.match(/^\/relay\/([A-Za-z0-9._-]{1,128})$/);
+    if (relayM) {
+      const ch = relayM[1];
+      if (req.method === "GET") return this.relayReceive(ch, res, send);
+      if (req.method === "PUT" || req.method === "POST") return this.relaySend(ch, req, send);
+      return send(405, { error: "use GET to receive, PUT/POST to send" });
+    }
+
     send(404, { error: "not found" });
+  }
+
+  private relayReceive(ch: string, res: http.ServerResponse, send: (c: number, o: unknown) => void): void {
+    const sender = this.waitingSend.get(ch);
+    if (sender) {
+      this.waitingSend.delete(ch);
+      res.writeHead(200, { "content-type": "application/octet-stream" });
+      sender.req.pipe(res);
+      sender.req.on("end", () => sender.reply(200));
+      sender.req.on("error", () => { sender.reply(500); res.destroy(); });
+      return;
+    }
+    // No sender yet — hold the receiver open until one arrives or we time out.
+    if (this.waitingRecv.has(ch)) return send(409, { error: "channel busy" });
+    this.waitingRecv.set(ch, res);
+    const to = setTimeout(() => {
+      if (this.waitingRecv.get(ch) === res) {
+        this.waitingRecv.delete(ch);
+        send(504, { error: "no sender within timeout" });
+      }
+    }, this.relayWaitMs);
+    res.on("close", () => {
+      clearTimeout(to);
+      if (this.waitingRecv.get(ch) === res) this.waitingRecv.delete(ch);
+    });
+  }
+
+  private relaySend(ch: string, req: http.IncomingMessage, send: (c: number, o: unknown) => void): void {
+    const recv = this.waitingRecv.get(ch);
+    if (recv) {
+      this.waitingRecv.delete(ch);
+      recv.writeHead(200, { "content-type": "application/octet-stream" });
+      req.pipe(recv);
+      req.on("end", () => send(200, { ok: true, relayed: true, stored: false }));
+      req.on("error", () => { recv.destroy(); send(500, { error: "relay error" }); });
+      return;
+    }
+    // No receiver yet — hold the sender's body (backpressured) until one arrives.
+    if (this.waitingSend.has(ch)) return send(409, { error: "channel busy" });
+    let to: ReturnType<typeof setTimeout>;
+    let replied = false;
+    const reply = (code: number) => {
+      if (replied) return;
+      replied = true;
+      clearTimeout(to);
+      send(code, code === 200 ? { ok: true, relayed: true, stored: false } : { error: "relay failed" });
+    };
+    this.waitingSend.set(ch, { req, reply });
+    to = setTimeout(() => {
+      if (this.waitingSend.get(ch)?.req === req) {
+        this.waitingSend.delete(ch);
+        reply(504);
+      }
+    }, this.relayWaitMs);
+    req.on("close", () => {
+      if (this.waitingSend.get(ch)?.req === req) this.waitingSend.delete(ch);
+    });
   }
 
   private async readMessages(since: number): Promise<Envelope[]> {

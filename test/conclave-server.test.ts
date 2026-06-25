@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { ConclaveServer } from "../src/server/conclave-server.js";
-import { uploadBlob, downloadBlob } from "../src/server/blob-client.js";
+import { promises as fs } from "node:fs";
+import { uploadBlob, downloadBlob, relaySend, relayReceive } from "../src/server/blob-client.js";
 import { NodeHost } from "../src/node/host.js";
 import { RelayWSTransport } from "../src/transports/relay-ws.js";
 import { TaskBoard } from "../src/agent/task-board.js";
@@ -66,6 +67,36 @@ test("ConclaveServer: blob data-exchange round-trips with sha256 integrity", asy
   assert.equal(new TextDecoder().decode(got), payload, "downloaded bytes match the upload");
 
   assert.equal((await (await fetch(`${httpBase}/blobs/${"0".repeat(64)}`)).status), 404, "missing blob 404s");
+
+  await server.stop();
+});
+
+test("ConclaveServer: streaming relay transits bytes WITHOUT storing them", async () => {
+  const dir = await tmpDir();
+  const server = new ConclaveServer({ wsPort: 0, httpPort: 0, dataDir: dir });
+  await server.start();
+  const base = `http://127.0.0.1:${server.httpPort()}`;
+
+  const payload = "stream-this-through-".repeat(2000); // ~40KB
+
+  // Receiver arrives first and waits; sender connects; bytes pipe straight through.
+  const recvP = relayReceive(base, "chan-A");
+  await new Promise((r) => setTimeout(r, 50));
+  await relaySend(base, "chan-A", payload);
+  const got = new TextDecoder().decode(await recvP);
+  assert.equal(got, payload, "receiver got exactly what the sender streamed");
+
+  // Order-independent: sender can arrive first too.
+  const sendP = relaySend(base, "chan-B", payload);
+  await new Promise((r) => setTimeout(r, 50));
+  const got2 = new TextDecoder().decode(await relayReceive(base, "chan-B"));
+  await sendP;
+  assert.equal(got2, payload);
+
+  // The crux: NOTHING was written to the server's blob store (disk stays empty).
+  const blobsDir = path.join(dir, "blobs");
+  const stored = await fs.readdir(blobsDir).catch(() => []);
+  assert.equal(stored.length, 0, "relay left nothing on disk");
 
   await server.stop();
 });

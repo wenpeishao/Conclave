@@ -33,3 +33,25 @@ export async function downloadBlob(httpBase: string, shaOrUri: string, token?: s
   if (!res.ok) throw new Error(`blob download failed: ${res.status}`);
   return new Uint8Array(await res.arrayBuffer());
 }
+
+/**
+ * Streaming relay — data exchange that the server does NOT store. Send bytes on a named
+ * channel; the call blocks until a receiver connects to the same channel, then the bytes
+ * pipe straight through the server (nothing written to disk). Pair with relayReceive.
+ */
+export async function relaySend(httpBase: string, channel: string, data: Uint8Array | string, token?: string): Promise<void> {
+  const body = typeof data === "string" ? new TextEncoder().encode(data) : data;
+  const res = await fetch(`${httpBase.replace(/\/$/, "")}/relay/${channel}`, {
+    method: "PUT",
+    headers: { "content-type": "application/octet-stream", ...authHeaders(token) },
+    body,
+  });
+  if (!res.ok) throw new Error(`relay send failed: ${res.status}`);
+}
+
+/** Receive bytes on a named channel — blocks until a sender connects. Nothing is stored server-side. */
+export async function relayReceive(httpBase: string, channel: string, token?: string): Promise<Uint8Array> {
+  const res = await fetch(`${httpBase.replace(/\/$/, "")}/relay/${channel}`, { headers: authHeaders(token) });
+  if (!res.ok) throw new Error(`relay receive failed: ${res.status}`);
+  return new Uint8Array(await res.arrayBuffer());
+}
