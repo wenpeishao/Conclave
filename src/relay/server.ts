@@ -2,6 +2,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { promises as fs, createReadStream, existsSync } from "node:fs";
 import * as readline from "node:readline";
 import * as path from "node:path";
+import type { IncomingMessage } from "node:http";
 import type { Envelope } from "../core/types.js";
 
 /**
@@ -20,6 +21,7 @@ import type { Envelope } from "../core/types.js";
 export interface RelayOpts {
   port: number; // 0 = pick a free port (read it back via .port())
   logFile: string;
+  token?: string; // if set, clients must connect with ?token=<token> or are refused
 }
 
 export class RelayServer {
@@ -29,10 +31,12 @@ export class RelayServer {
   private wantPort: number;
   private count = 0;
   private appendChain: Promise<void> = Promise.resolve();
+  private token?: string;
 
   constructor(o: RelayOpts) {
     this.wantPort = o.port;
     this.logFile = o.logFile;
+    this.token = o.token;
   }
 
   port(): number {
@@ -44,7 +48,7 @@ export class RelayServer {
     await fs.mkdir(path.dirname(this.logFile), { recursive: true });
     this.count = await countLines(this.logFile);
     this.wss = new WebSocketServer({ port: this.wantPort });
-    this.wss.on("connection", (ws) => this.onConn(ws));
+    this.wss.on("connection", (ws, req) => this.onConn(ws, req));
     await new Promise<void>((resolve, reject) => {
       this.wss!.once("listening", () => resolve());
       this.wss!.once("error", reject);
@@ -57,7 +61,14 @@ export class RelayServer {
     await new Promise<void>((resolve) => (this.wss ? this.wss.close(() => resolve()) : resolve()));
   }
 
-  private onConn(ws: WebSocket) {
+  private onConn(ws: WebSocket, req: IncomingMessage) {
+    if (this.token) {
+      const got = new URL(req.url ?? "/", "http://localhost").searchParams.get("token");
+      if (got !== this.token) {
+        ws.close(1008, "unauthorized");
+        return;
+      }
+    }
     this.clients.add(ws);
     ws.on("message", (data) => {
       let msg: { t?: string; cursor?: string | null; env?: Envelope };

@@ -6,6 +6,7 @@ export interface TransportConfig {
   kind: "relay" | "git";
   // relay
   url?: string;
+  token?: string;
   // git
   repoDir?: string;
   agentDir?: string;
@@ -17,7 +18,7 @@ export interface TransportConfig {
 export function buildTransport(c: TransportConfig): Transport {
   if (c.kind === "relay") {
     if (!c.url) throw new Error("relay transport requires a url (ws://host:port)");
-    return new RelayWSTransport(c.url);
+    return new RelayWSTransport(c.url, c.token);
   }
   if (c.kind === "git") {
     if (!c.repoDir) throw new Error("git transport requires a repo dir (a working clone of the bus)");

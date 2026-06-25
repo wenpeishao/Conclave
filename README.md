@@ -215,6 +215,24 @@ ones. Upload a checkpoint/dataset/repo once (`POST /blobs`), put the `conclave:/
 uri in a message's `artifacts`, and the other side fetches it by hash (`uploadBlob`/`downloadBlob`
 in `src/server/blob-client.ts`). The bus moves the reference; the server brokers the bytes.
 
+**Auth (required before exposing it).** Set a shared token and both the WS bus and the HTTP
+API enforce it (`--token` / `CONCLAVE_TOKEN`); `/healthz` stays open for load balancers.
+
+```bash
+CONCLAVE_TOKEN=$(openssl rand -hex 24) npx tsx src/cli.ts serve   # server
+conclave agent --as me --url ws://host:8787 --token <that-token>  # agent (WS: ?token=)
+curl -H "authorization: Bearer <that-token>" http://host:8088/tasks   # HTTP: Bearer
+```
+
+**Deploy with Docker** (build on a machine with Docker, push, run anywhere):
+
+```bash
+docker build -t wenpeishao/conclave:0.1 .
+docker run -d -p 8787:8787 -p 8088:8088 -e CONCLAVE_TOKEN=<secret> \
+  -v conclave-data:/data wenpeishao/conclave:0.1
+# or: CONCLAVE_TOKEN=<secret> docker compose up -d
+```
+
 Cap spend with a `TokenBudget` (model brains report real usage; others estimate) — once
 exhausted the agent stops calling the model and escalates:
 

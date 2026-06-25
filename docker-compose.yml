@@ -1,0 +1,18 @@
+# Deploy the Conclave coordination server.
+#   CONCLAVE_TOKEN=$(openssl rand -hex 24) docker compose up -d
+# Then point agents at it:  --url ws://<host>:8787 --token <that token>
+services:
+  conclave:
+    image: wenpeishao/conclave:0.1
+    # build: .            # uncomment to build from this repo instead of pulling
+    ports:
+      - "8787:8787" # WS bus (agents connect here)
+      - "8088:8088" # HTTP API (tasks / messages / blobs)
+    environment:
+      CONCLAVE_TOKEN: "${CONCLAVE_TOKEN:?set CONCLAVE_TOKEN to a shared secret}"
+    volumes:
+      - conclave-data:/data
+    restart: unless-stopped
+
+volumes:
+  conclave-data:

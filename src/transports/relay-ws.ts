@@ -21,7 +21,11 @@ export class RelayWSTransport implements Transport {
   private closing = false;
   private backoff = 500;
 
-  constructor(url: string) {
+  constructor(url: string, token?: string) {
+    // Auth (if any) rides as a ?token= query param on the ws URL.
+    if (token && !/[?&]token=/.test(url)) {
+      url += (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token);
+    }
     this.url = url;
   }
 

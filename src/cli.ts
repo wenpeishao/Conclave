@@ -48,7 +48,7 @@ function transportFromArgs(a: Args, agentName: string): TransportConfig {
       pollMs: a["poll"] ? Number(a["poll"]) : undefined,
     };
   }
-  return { kind: "relay", url: str(a, "url", "ws://127.0.0.1:8787") };
+  return { kind: "relay", url: str(a, "url", "ws://127.0.0.1:8787"), token: str(a, "token") || process.env.CONCLAVE_TOKEN || undefined };
 }
 
 function makeCard(a: Args, name: string): AgentCard {
@@ -66,7 +66,7 @@ function makeCard(a: Args, name: string): AgentCard {
 async function cmdUp(a: Args) {
   const port = a["port"] ? Number(a["port"]) : 8787;
   const logFile = str(a, "log", path.join(dataHome(a), "relay.log"));
-  const relay = new RelayServer({ port, logFile });
+  const relay = new RelayServer({ port, logFile, token: str(a, "token") || process.env.CONCLAVE_TOKEN || undefined });
   await relay.start();
   console.log(`[conclave] relay listening on ws://0.0.0.0:${relay.port()}`);
   console.log(`[conclave] durable log: ${logFile}`);
@@ -216,10 +216,11 @@ async function cmdServe(a: Args) {
   const wsPort = a["port"] ? Number(a["port"]) : 8787;
   const httpPort = a["http"] ? Number(a["http"]) : 8088;
   const dataDir = str(a, "data", path.join(dataHome(a), "server"));
+  const token = str(a, "token") || process.env.CONCLAVE_TOKEN || undefined;
   const { ConclaveServer } = await import("./server/conclave-server.js");
-  const server = new ConclaveServer({ wsPort, httpPort, dataDir });
+  const server = new ConclaveServer({ wsPort, httpPort, dataDir, token });
   await server.start();
-  console.log(`[conclave] server up`);
+  console.log(`[conclave] server up${token ? " (auth: token required)" : " (NO AUTH — set --token / CONCLAVE_TOKEN before exposing)"}`);
   console.log(`[conclave]   bus  (agents):   ws://0.0.0.0:${server.wsPort()}`);
   console.log(`[conclave]   http (api/data): http://0.0.0.0:${server.httpPort()}`);
   console.log(`[conclave]   tasks: GET/POST /tasks · history: GET /messages · data: POST/GET /blobs`);
@@ -343,8 +344,9 @@ async function cmdTeam(a: Args) {
   const brainKind = str(a, "brain", "claude");
   const guardN = a["guard"] ? Number(a["guard"]) : 6;
   const dataRoot = path.join(dataHome(a), "team");
+  const token = str(a, "token") || process.env.CONCLAVE_TOKEN || undefined;
 
-  const relay = new RelayServer({ port, logFile: path.join(dataRoot, "relay.log") });
+  const relay = new RelayServer({ port, logFile: path.join(dataRoot, "relay.log"), token });
   await relay.start();
   const url = `ws://127.0.0.1:${relay.port()}`;
   console.log(`[conclave] team relay on ws://0.0.0.0:${relay.port()}`);
@@ -354,7 +356,7 @@ async function cmdTeam(a: Args) {
   for (const m of members) {
     const card = makeCard(a, m);
     card.id = `agent://${m}`; // bare id for clean addressing within the team
-    const host = new NodeHost({ card, transport: buildTransport({ kind: "relay", url }), dataDir: path.join(dataRoot, m) });
+    const host = new NodeHost({ card, transport: buildTransport({ kind: "relay", url, token }), dataDir: path.join(dataRoot, m) });
     // NOTE: teammates coordinate via direct messages today. Autonomous task-board working
     // (each teammate runs a TaskBoard + claimNext loop, emitting claim/done) is the next
     // step — until then we don't subscribe them to topic://tasks (it would just feed

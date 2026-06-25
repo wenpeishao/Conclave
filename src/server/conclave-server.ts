@@ -28,6 +28,7 @@ export interface ConclaveServerOpts {
   wsPort: number; // 0 = pick free
   httpPort: number; // 0 = pick free
   dataDir: string; // holds relay.log, blobs/, board host state
+  token?: string; // shared secret; if set, WS + HTTP both require it
 }
 
 export class ConclaveServer {
@@ -39,13 +40,15 @@ export class ConclaveServer {
   private blobsDir: string;
   private dataDir: string;
   private wantHttpPort: number;
+  private token?: string;
 
   constructor(o: ConclaveServerOpts) {
     this.dataDir = o.dataDir;
     this.logFile = path.join(o.dataDir, "relay.log");
     this.blobsDir = path.join(o.dataDir, "blobs");
     this.wantHttpPort = o.httpPort;
-    this.relay = new RelayServer({ port: o.wsPort, logFile: this.logFile });
+    this.token = o.token;
+    this.relay = new RelayServer({ port: o.wsPort, logFile: this.logFile, token: o.token });
     // The internal board participant is wired after the relay is up (needs its port).
     this.host = null as unknown as NodeHost;
     this.board = null as unknown as TaskBoard;
@@ -65,7 +68,7 @@ export class ConclaveServer {
     // A loopback bus participant that owns the canonical board view.
     this.host = new NodeHost({
       card: { id: "agent://hub", name: "hub", capabilities: ["server"] },
-      transport: new RelayWSTransport(`ws://127.0.0.1:${this.relay.port()}`),
+      transport: new RelayWSTransport(`ws://127.0.0.1:${this.relay.port()}`, this.token),
       dataDir: path.join(this.dataDir, "hub"),
       heartbeatMs: 15000,
     });
@@ -98,6 +101,17 @@ export class ConclaveServer {
       res.writeHead(code, { "content-type": "application/json" });
       res.end(JSON.stringify(obj));
     };
+
+    // Unauthenticated liveness probe (no sensitive data) — for container HEALTHCHECK / LBs.
+    if (req.method === "GET" && p === "/healthz") return send(200, { ok: true });
+
+    // Shared-token auth (Authorization: Bearer <t>, or x-conclave-token, or ?token=).
+    if (this.token) {
+      const auth = req.headers["authorization"];
+      const bearer = typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : undefined;
+      const got = bearer ?? (req.headers["x-conclave-token"] as string | undefined) ?? url.searchParams.get("token") ?? undefined;
+      if (got !== this.token) return send(401, { error: "unauthorized" });
+    }
 
     // status
     if (req.method === "GET" && p === "/") {
