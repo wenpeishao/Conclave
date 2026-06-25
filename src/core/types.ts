@@ -41,8 +41,10 @@ export interface AgentCard {
   name: string;
   model?: { vendor?: string; id?: string; runtime?: string };
   device?: { host?: string; kind?: string };
-  capabilities?: string[]; // e.g. ["htcondor.submit", "staging.rw"]
+  capabilities?: string[]; // advertised resources/skills, e.g. ["gpu:rtx5090-32gb", "dataset:imagenet"]
   owns?: string[]; // write-ownership claims, e.g. ["repo:foo/chtc/**"]
+  status?: "available" | "busy" | string; // live availability — surfaced on the global roster
+  zones?: string[]; // zone memberships this agent advertises (informational)
   addressable?: boolean;
   realtime?: "push" | "poll"; // adapter property → sets the latency floor
   policy?: Record<string, unknown>; // e.g. { max_tokens_per_hour: 2_000_000 }

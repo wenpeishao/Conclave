@@ -158,20 +158,28 @@ export class ConclaveServer {
     if (env.kind === "presence") {
       const card = env.body as AgentCard | undefined;
       if (!card || card.id !== env.from) return { ok: false, reason: "presence id must equal from" };
+      return { ok: true }; // presence is the global discovery plane — no zone required
     }
-    // Board action authorization — role/canRun are enforced here, not just advised client-side.
+    // DENY-BY-DEFAULT for the work plane: a zoned agent must stamp one of its zones on any
+    // work-topic envelope (so it can't escape isolation by omitting env.zone). Directed P2P
+    // and the discovery topics (presence/discovery) and "*" queries are exempt.
+    const recips = Array.isArray(env.to) ? env.to : [];
+    const DISCOVERY = new Set(["topic://presence", "topic://discovery"]);
+    const workTopics = recips.filter((t) => t.startsWith("topic://") && !DISCOVERY.has(t));
+    if ((rec.zones ?? []).length > 0 && workTopics.length > 0 && !env.zone) {
+      return { ok: false, reason: "zoned agent must stamp a member zone on work-topic traffic" };
+    }
+    // Board action authorization — fail CLOSED (unknown task → reject, so a pre-board race can't slip through).
     if (env.kind === "event" && env.subject === "task" && isTaskOp(env.body)) {
       const op = env.body;
       if (op.op === "claim") {
         const task = this.board.list().find((t) => t.id === op.id);
-        if (task?.for && task.for !== rec.role) {
-          return { ok: false, reason: `role '${rec.role ?? "-"}' may not claim a task for '${task.for}'` };
-        }
+        if (!task) return { ok: false, reason: "claim of unknown task" };
+        if (task.for && task.for !== rec.role) return { ok: false, reason: `role '${rec.role ?? "-"}' may not claim a task for '${task.for}'` };
       } else if (op.op === "done") {
         const task = this.board.list().find((t) => t.id === op.id);
-        if (task?.claimedBy && task.claimedBy !== env.from) {
-          return { ok: false, reason: "only the claiming agent may complete a task" };
-        }
+        if (!task) return { ok: false, reason: "done of unknown task" };
+        if (!task.claimedBy || task.claimedBy !== env.from) return { ok: false, reason: "only the claiming agent may complete a task" };
       }
     }
     return { ok: true };
@@ -234,6 +242,11 @@ export class ConclaveServer {
       (req.method === "POST" && /^\/tasks\/[^/]+\/(claim|done)$/.test(p));
     if (this.registry && busMutating && !isAdmin) {
       return send(403, { error: "secure mode: bus-mutating HTTP endpoints require the admin token (agents publish over the signed bus instead)" });
+    }
+    // The flat message/blob history is cross-zone; in secure mode it is an admin-only
+    // observability surface. Agents receive their own zone's traffic over the scoped bus.
+    if (this.registry && req.method === "GET" && p === "/messages" && !isAdmin) {
+      return send(403, { error: "secure mode: message history is admin-only (agents read scoped traffic over the bus)" });
     }
 
     // --- identity / enrollment (secure mode) ---

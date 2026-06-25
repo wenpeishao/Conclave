@@ -81,7 +81,15 @@ export class NodeHost {
     this.topics.add(topic);
   }
 
+  /** Update this agent's advertised availability and re-announce it on the global roster. */
+  setStatus(status: string): void {
+    this.card.status = status;
+    void this.announce();
+  }
+
   async start(): Promise<void> {
+    if (!this.card.status) this.card.status = "available";
+    if (this.zone && !this.card.zones) this.card.zones = [this.zone];
     await fs.mkdir(this.dataDir, { recursive: true });
     await this.loadState();
     this.t.onEnvelope((e, c) => {
@@ -154,13 +162,14 @@ export class NodeHost {
   }
 
   private async announce() {
+    // Presence is the GLOBAL discovery plane: it is NOT zone-stamped, so every agent sees the
+    // full roster (who is online, their capabilities, available/busy) across zones.
     let env = makeEnvelope({
       from: this.card.id,
       to: ["topic://presence"],
       kind: "presence",
       body: this.card,
     });
-    if (this.zone) env.zone = this.zone;
     if (this.identity) env = signEnvelope(env, this.identity.privateKey);
     try {
       await this.t.publish(env);

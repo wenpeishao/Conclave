@@ -57,6 +57,7 @@ export class TeamWorker {
         const task = await this.board.claimNext(settleMs, role);
         if (task) {
           this.busy = true;
+          this.host.setStatus("busy"); // surface availability on the global roster
           this.opts.onEvent?.({ type: "claim", task });
           let result: string;
           try {
@@ -69,6 +70,7 @@ export class TeamWorker {
           // Pipeline handoff: pass the work product to the next role as a new task.
           if (this.opts.handoffTo) await this.board.add(result, { for: this.opts.handoffTo });
           this.busy = false;
+          this.host.setStatus("available");
           continue; // immediately look for the next task
         }
         this.opts.onEvent?.({ type: "lost" }); // someone else won the claim

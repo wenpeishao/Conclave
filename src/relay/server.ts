@@ -137,17 +137,19 @@ export class RelayServer {
     await this.replay(ws, msg.cursor ?? null);
   }
 
-  /** Scoped routing: should this connection receive this envelope? */
+  /** Scoped routing: should this connection receive this envelope? Deny-by-default. */
   private routeOk(ws: WebSocket, env: Envelope): boolean {
     if (!this.authenticate) return true; // legacy: broadcast to all, clients filter locally
     const b = this.bindings.get(ws);
     if (!b) return false; // unauthenticated socket in scoped mode receives nothing
     if (b.wildcard) return true; // the hub / control plane sees everything
-    if (env.to === "*") return true; // global broadcast
+    if (env.to === "*") return true; // global discovery broadcast
     if (!Array.isArray(env.to)) return false;
-    if (env.to.includes(b.id)) return true; // directed to this agent
+    // Discovery plane is global regardless of any zone stamp (roster + global queries).
+    if (env.to.some((t) => t === "topic://presence" || t === "topic://discovery")) return true;
+    if (env.to.includes(b.id)) return true; // directed to this agent (crosses zones intentionally)
     if (env.to.some((t) => t.startsWith("topic://"))) {
-      // un-zoned topic = global topic (everyone); zone-scoped topic = members only
+      // Work topic: zone-scoped → members only; un-zoned → only from global (zone-less) senders.
       return env.zone == null || b.zones.includes(env.zone);
     }
     return false;

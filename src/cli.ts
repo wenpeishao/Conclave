@@ -86,11 +86,14 @@ function buildHost(a: Args, name: string): NodeHost {
 function makeCard(a: Args, name: string): AgentCard {
   // Default id is the bare name so `--to <name>` just works. Pass --id agent://name@host
   // explicitly when you need to disambiguate two agents that share a name across devices.
+  const caps = str(a, "capabilities") || str(a, "caps");
   return {
     id: str(a, "id", `agent://${name}`),
     name,
     device: { host: os.hostname() },
     model: a["model"] ? { runtime: str(a, "model") } : undefined,
+    capabilities: caps ? caps.split(",").map((s) => s.trim()).filter(Boolean) : undefined,
+    status: "available",
     realtime: str(a, "transport", "relay") === "git" ? "poll" : "push",
   };
 }

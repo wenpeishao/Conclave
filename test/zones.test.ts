@@ -90,6 +90,40 @@ test("zones: zone-broadcast reaches same-zone members only; P2P crosses zones", 
   await server.stop();
 });
 
+test("zones: discovery plane is global — presence (capabilities + availability) crosses zones", async () => {
+  const dir = await tmpDir();
+  const server = new ConclaveServer({ wsPort: 0, httpPort: 0, dataDir: dir, token: CT, adminToken: AT });
+  await server.start();
+  const base = `http://127.0.0.1:${server.httpPort()}`;
+  const wsUrl = `ws://127.0.0.1:${server.wsPort()}`;
+
+  const gpuId = await enroll(base, "gpu", ["s-resource"]);
+  const labId = await enroll(base, "lab", ["s-lab"]);
+
+  // The resource agent advertises its capabilities; it lives in a different zone than lab.
+  const gpu = new NodeHost({ card: { id: gpuId.id, name: "gpu", capabilities: ["gpu:rtx5090-32gb"], status: "available" }, transport: new RelayWSTransport(wsUrl, CT, gpuId), dataDir: await tmpDir(), identity: gpuId, zone: "s-resource", heartbeatMs: 60000 });
+  const lab = new NodeHost({ card: { id: labId.id, name: "lab" }, transport: new RelayWSTransport(wsUrl, CT, labId), dataDir: await tmpDir(), identity: labId, zone: "s-lab", heartbeatMs: 60000 });
+  await gpu.start();
+  await lab.start();
+  await wait(700);
+
+  // lab (zone s-lab) can SEE the resource agent in zone s-resource — who is online, what it
+  // has, and whether it is available — even though their WORK chatter is isolated.
+  const seen = lab.getRoster().find((x) => x.id === "agent://gpu");
+  assert.ok(seen, "input zone sees the resource agent across zones (global discovery)");
+  assert.deepEqual(seen?.capabilities, ["gpu:rtx5090-32gb"], "capabilities are advertised");
+  assert.equal(seen?.status, "available", "availability is visible");
+
+  // Availability updates propagate globally.
+  gpu.setStatus("busy");
+  await wait(500);
+  assert.equal(lab.getRoster().find((x) => x.id === "agent://gpu")?.status, "busy", "busy status reaches other zones");
+
+  await gpu.stop();
+  await lab.stop();
+  await server.stop();
+});
+
 test("zones: an agent cannot stamp a zone it is not a member of", async () => {
   const dir = await tmpDir();
   const server = new ConclaveServer({ wsPort: 0, httpPort: 0, dataDir: dir, token: CT, adminToken: AT });
@@ -114,7 +148,8 @@ test("zones: an agent cannot stamp a zone it is not a member of", async () => {
   await host.send(["topic://room"], { body: "intrusion" });
   await wait(500);
   // The hub never logged it (authorizePolicy rejects a zone the sender isn't in).
-  const msgs = (await (await fetch(`${base}/messages`, { headers: { authorization: `Bearer ${CT}` } })).json()) as { messages: { body?: unknown }[] };
+  // History is admin-only in secure mode, so read it with the admin token.
+  const msgs = (await (await fetch(`${base}/messages`, { headers: { authorization: `Bearer ${AT}` } })).json()) as { messages: { body?: unknown }[] };
   rejected = !msgs.messages.some((m) => m.body === "intrusion");
   assert.ok(rejected, "publish stamped with a non-member zone is dropped");
 
