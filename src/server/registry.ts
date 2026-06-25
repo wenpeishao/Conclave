@@ -31,6 +31,7 @@ interface PendingEnroll {
   role?: string;
   canRun: boolean;
   zones: string[];
+  pin?: string; // if set, enroll must present exactly this public key (defeats token interception)
   expTs: number;
 }
 
@@ -62,7 +63,7 @@ export class AgentRegistry {
   }
 
   /** Admin: create a one-time enrollment token for a new agent name. */
-  invite(opts: { name: string; role?: string; canRun?: boolean; zones?: string[]; ttlMs?: number; now?: number }): PendingEnroll {
+  invite(opts: { name: string; role?: string; canRun?: boolean; zones?: string[]; pin?: string; ttlMs?: number; now?: number }): PendingEnroll {
     const name = opts.name.replace(/^agent:\/\//, "").trim();
     if (!name) throw new Error("name required");
     const id = `agent://${name}`;
@@ -77,6 +78,7 @@ export class AgentRegistry {
       role: opts.role,
       canRun: opts.canRun ?? false,
       zones: opts.zones ?? [],
+      pin: opts.pin,
       expTs: now + (opts.ttlMs ?? 60 * 60 * 1000), // default 1h
     };
     this.pending.set(p.token, p);
@@ -98,6 +100,7 @@ export class AgentRegistry {
       throw new Error("enrollment token expired");
     }
     if (!isValidPublicKey(publicKey)) throw new Error("publicKey is not a valid ed25519 key");
+    if (p.pin && publicKey !== p.pin) throw new Error("publicKey does not match the pinned device key");
     if (!proof || !verifyData(publicKey, token, proof)) throw new Error("missing or invalid proof-of-possession");
     const existing = this.agents.get(p.id);
     if (existing?.revoked) throw new Error(`${p.id} is revoked; admin must rotate it before re-enrollment`);

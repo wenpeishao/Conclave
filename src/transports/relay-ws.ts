@@ -32,15 +32,6 @@ export class RelayWSTransport implements Transport {
     this.identity = identity;
   }
 
-  // A signed, timestamped hello authenticates this connection to the relay so it can route
-  // by identity/zone. The timestamp bounds how long a captured hello can be replayed.
-  private helloFrame(): object {
-    const base = { t: "hello", cursor: this.cursor };
-    if (!this.identity) return base;
-    const ts = new Date().toISOString();
-    const sig = signData(this.identity.privateKey, { id: this.identity.id, cursor: this.cursor, ts });
-    return { ...base, id: this.identity.id, ts, sig };
-  }
 
   onEnvelope(h: (e: Envelope, c: string | null) => void) {
     this.handler = h;
@@ -65,18 +56,24 @@ export class RelayWSTransport implements Transport {
       ws.on("open", () => {
         this.open = true;
         this.backoff = 500;
-        ws.send(JSON.stringify(this.helloFrame()));
+        // Legacy (no identity): say hello immediately. Secure (identity): wait for the
+        // server's one-time challenge, then answer with a nonce-signed hello (anti-replay).
+        if (!this.identity) ws.send(JSON.stringify({ t: "hello", cursor: this.cursor }));
         for (const e of this.outQ.splice(0)) ws.send(JSON.stringify({ t: "pub", env: e }));
         settle();
       });
       ws.on("message", (d) => {
-        let m: { t?: string; env?: Envelope; cursor?: string | null; reason?: string };
+        let m: { t?: string; env?: Envelope; cursor?: string | null; reason?: string; nonce?: string };
         try {
           m = JSON.parse(d.toString());
         } catch {
           return;
         }
-        if (m.t === "env" && m.env) {
+        if (m.t === "challenge" && this.identity) {
+          const nonce = m.nonce;
+          const sig = signData(this.identity.privateKey, { id: this.identity.id, cursor: this.cursor, nonce });
+          ws.send(JSON.stringify({ t: "hello", cursor: this.cursor, id: this.identity.id, nonce, sig }));
+        } else if (m.t === "env" && m.env) {
           this.cursor = m.cursor ?? this.cursor;
           this.handler?.(m.env, this.cursor);
         } else if (m.t === "err") {

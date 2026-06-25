@@ -103,6 +103,19 @@ test("registry: revoke burns pending tokens so a leaked one can't resurrect the 
   assert.throws(() => reg.enroll(t2, attacker.publicKey, pop(attacker.privateKey, t2)), /invalid or already-used/);
 });
 
+test("registry: a pinned invite only accepts the pinned key (defeats token interception)", async () => {
+  const reg = new AgentRegistry(await tmpDir());
+  await reg.load();
+  const device = generateIdentity("dev"); // the intended device pre-generates its key
+  const attacker = generateIdentity("dev"); // an interceptor with their own key
+
+  const inv = reg.invite({ name: "dev", pin: device.publicKey });
+  // The interceptor holds the token + a valid proof for THEIR key, but it isn't the pinned key.
+  assert.throws(() => reg.enroll(inv.token, attacker.publicKey, pop(attacker.privateKey, inv.token)), /pinned device key/);
+  // Only the pinned device can enroll.
+  assert.ok(reg.enroll(inv.token, device.publicKey, pop(device.privateKey, inv.token)));
+});
+
 test("registry: persists across reload", async () => {
   const dir = await tmpDir();
   const reg1 = new AgentRegistry(dir);

@@ -285,6 +285,21 @@ function httpBase(a: Args): string {
   return `${scheme}://${host}:${httpPort}`;
 }
 
+// Device: pre-generate a keypair and print its public key, so an admin can PIN it at invite
+// time (defeats enrollment-token interception — only this exact key can enroll the name).
+async function cmdKeygen(a: Args) {
+  const name = str(a, "as");
+  if (!name) throw new Error("keygen requires --as <name>");
+  const file = str(a, "identity") || path.join(dataHome(a), "identity.json");
+  if (existsSync(file) && !a["force"]) throw new Error(`identity already exists at ${file} (use --force to overwrite)`);
+  const ident = generateIdentity(name);
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify({ ...ident, zones: [] }, null, 2));
+  console.log(`[conclave] generated identity for ${ident.id} → ${file}`);
+  console.log(`\nGive this public key to the admin to PIN your enrollment:\n  ${ident.publicKey}\n`);
+  console.log(`Admin runs:  conclave invite --as ${name} --pin ${ident.publicKey} --admin-token <a> --url <ws>`);
+}
+
 // Admin: mint a one-time enrollment token for a new agent identity.
 async function cmdInvite(a: Args) {
   const name = str(a, "as") || str(a, "name");
@@ -296,7 +311,7 @@ async function cmdInvite(a: Args) {
   const res = await fetch(`${base}/admin/invite`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${admin}` },
-    body: JSON.stringify({ name, role: str(a, "role") || undefined, canRun: a["can-run"] === true, zones }),
+    body: JSON.stringify({ name, role: str(a, "role") || undefined, canRun: a["can-run"] === true, zones, pin: str(a, "pin") || undefined }),
   });
   const j = (await res.json()) as { enrollToken?: string; error?: string; role?: string; canRun?: boolean; zones?: string[] };
   if (!res.ok) throw new Error(`invite failed: ${j.error ?? res.status}`);
@@ -314,7 +329,9 @@ async function cmdEnroll(a: Args) {
   if (!enroll || !name) throw new Error("join requires --as <name> --enroll <token>");
   const base = httpBase(a);
   const token = str(a, "token") || process.env.CONCLAVE_TOKEN;
-  const ident = generateIdentity(name);
+  // Reuse a pre-generated identity (from `conclave keygen`, whose pubkey the admin may have
+  // pinned) if present; otherwise mint a fresh one (trust-on-first-use).
+  const ident = deviceIdentity(a) ?? generateIdentity(name);
   const proof = signData(ident.privateKey, enroll); // prove we hold the private key for this pubkey
   const res = await fetch(`${base}/enroll`, {
     method: "POST",
@@ -582,6 +599,8 @@ async function main() {
       return cmdServe(args);
     case "invite":
       return cmdInvite(args);
+    case "keygen":
+      return cmdKeygen(args);
     case "enroll":
       return cmdEnroll(args);
     default:

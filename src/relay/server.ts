@@ -4,6 +4,7 @@ import * as readline from "node:readline";
 import * as path from "node:path";
 import type { IncomingMessage } from "node:http";
 import type { Envelope } from "../core/types.js";
+import { randomToken } from "../core/identity.js";
 
 /**
  * The relay: a tiny broadcast hub with a durable append-only log.
@@ -41,11 +42,14 @@ export class RelayServer {
   private token?: string;
   private verify?: (env: Envelope) => { ok: boolean; reason?: string } | Promise<{ ok: boolean; reason?: string }>;
   private replayVerify?: (env: Envelope) => boolean;
-  private authenticate?: (hello: { id?: string; cursor?: string | null; ts?: string; sig?: string }) => ConnBinding | null;
+  private authenticate?: (hello: { id?: string; cursor?: string | null; nonce?: string; sig?: string }) => ConnBinding | null;
   private bindings = new Map<WebSocket, ConnBinding>();
+  private challenges = new Map<WebSocket, string>(); // per-connection one-time nonce
   private recentIds = new Set<string>(); // anti-replay: ids already accepted
   private recentOrder: string[] = [];
   private freshnessMs = 600000; // ±10 min clock window for accepting an envelope
+  private rates = new Map<WebSocket, { n: number; t: number }>(); // per-connection pub rate
+  private maxPubPerSec = 300;
 
   constructor(o: RelayOpts) {
     this.wantPort = o.port;
@@ -65,7 +69,7 @@ export class RelayServer {
    * "*"/global → everyone) instead of broadcasting to all. Without it, the relay
    * broadcasts to every client (legacy behavior) and clients filter locally.
    */
-  onAuthenticate(fn: (hello: { id?: string; cursor?: string | null; ts?: string; sig?: string }) => ConnBinding | null) {
+  onAuthenticate(fn: (hello: { id?: string; cursor?: string | null; nonce?: string; sig?: string }) => ConnBinding | null) {
     this.authenticate = fn;
   }
 
@@ -106,8 +110,15 @@ export class RelayServer {
       }
     }
     this.clients.add(ws);
+    // Secure mode: issue a one-time challenge nonce. The client must echo it in a signed
+    // hello, so a captured hello cannot be replayed to bind a different socket to an id.
+    if (this.authenticate) {
+      const nonce = randomToken(16);
+      this.challenges.set(ws, nonce);
+      sendFrame(ws, { t: "challenge", nonce });
+    }
     ws.on("message", (data) => {
-      let msg: { t?: string; cursor?: string | null; env?: Envelope; id?: string; ts?: string; sig?: string };
+      let msg: { t?: string; cursor?: string | null; env?: Envelope; id?: string; nonce?: string; sig?: string };
       try {
         msg = JSON.parse(data.toString());
       } catch {
@@ -119,13 +130,22 @@ export class RelayServer {
     const drop = () => {
       this.clients.delete(ws);
       this.bindings.delete(ws);
+      this.challenges.delete(ws);
+      this.rates.delete(ws);
     };
     ws.on("close", drop);
     ws.on("error", drop);
   }
 
-  private async onHello(ws: WebSocket, msg: { id?: string; cursor?: string | null; ts?: string; sig?: string }) {
+  private async onHello(ws: WebSocket, msg: { id?: string; cursor?: string | null; nonce?: string; sig?: string }) {
     if (this.authenticate) {
+      const expected = this.challenges.get(ws);
+      this.challenges.delete(ws); // one-time
+      if (!expected || msg.nonce !== expected) {
+        sendFrame(ws, { t: "err", reason: "missing or stale challenge nonce" });
+        ws.close(1008, "unauthorized");
+        return;
+      }
       const binding = this.authenticate(msg);
       if (!binding) {
         sendFrame(ws, { t: "err", reason: "connection authentication failed" });
@@ -174,6 +194,15 @@ export class RelayServer {
   }
 
   private async handlePub(ws: WebSocket, env: Envelope): Promise<void> {
+    // Per-connection rate limit, checked BEFORE the expensive signature verify, so a flood of
+    // bogus frames can't pin the CPU (asymmetric-work DoS).
+    const now0 = Date.now();
+    const r = this.rates.get(ws);
+    if (!r || now0 - r.t >= 1000) this.rates.set(ws, { n: 1, t: now0 });
+    else if (++r.n > this.maxPubPerSec) {
+      sendFrame(ws, { t: "err", reason: "rate limit exceeded", id: env.id });
+      return;
+    }
     // Freshness: reject envelopes whose timestamp is far outside the clock window. This bounds
     // how long a captured signed envelope can be replayed for.
     const ts = Date.parse(env.ts);
@@ -220,6 +249,7 @@ export class RelayServer {
 
 type ServerFrame =
   | { t: "env"; env: Envelope; cursor: string }
+  | { t: "challenge"; nonce: string }
   | { t: "err"; reason: string; id?: string };
 
 function sendFrame(ws: WebSocket, frame: ServerFrame) {

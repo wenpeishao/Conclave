@@ -53,6 +53,9 @@ export class ConclaveServer {
   private waitingRecv = new Map<string, http.ServerResponse>();
   private waitingSend = new Map<string, { req: http.IncomingMessage; reply: (code: number) => void }>();
   private relayWaitMs = 120000;
+  private maxRelayChannels = 256; // cap concurrent streaming-relay rendezvous (DoS guard)
+  private blobBytes = 0; // running total of stored blob bytes
+  private maxBlobBytes = 2 * 1024 * 1024 * 1024; // 2 GiB blob-store quota
 
   constructor(o: ConclaveServerOpts) {
     this.dataDir = o.dataDir;
@@ -77,6 +80,10 @@ export class ConclaveServer {
 
   async start(): Promise<void> {
     await fs.mkdir(this.blobsDir, { recursive: true });
+    // Seed the blob quota counter from what's already on disk.
+    for (const f of await fs.readdir(this.blobsDir).catch(() => [])) {
+      this.blobBytes += (await fs.stat(path.join(this.blobsDir, f)).catch(() => ({ size: 0 }))).size;
+    }
 
     // SECURE MODE: an admin token turns on per-agent identity + signature enforcement.
     if (this.adminToken && !this.token) {
@@ -185,14 +192,13 @@ export class ConclaveServer {
     return { ok: true };
   }
 
-  /** Authenticate a connection's signed, timestamped hello → its routing binding, or null. */
-  private authenticateConn(hello: { id?: string; cursor?: string | null; ts?: string; sig?: string }): ConnBinding | null {
-    if (!hello.id || !hello.sig) return null;
-    const t = Date.parse(hello.ts ?? "");
-    if (!Number.isFinite(t) || Math.abs(Date.now() - t) > 600000) return null; // freshness → bounds hello replay
+  /** Authenticate a connection's nonce-signed hello → its routing binding, or null. The relay
+   *  has already checked the nonce is the fresh one it issued; here we verify the signature. */
+  private authenticateConn(hello: { id?: string; cursor?: string | null; nonce?: string; sig?: string }): ConnBinding | null {
+    if (!hello.id || !hello.sig || !hello.nonce) return null;
     const rec = this.registry!.get(hello.id);
     if (!rec || rec.revoked) return null;
-    if (!verifyData(rec.publicKey, { id: hello.id, cursor: hello.cursor ?? null, ts: hello.ts }, hello.sig)) return null;
+    if (!verifyData(rec.publicKey, { id: hello.id, cursor: hello.cursor ?? null, nonce: hello.nonce }, hello.sig)) return null;
     return { id: hello.id, zones: rec.zones ?? [], wildcard: hello.id === this.hubIdentity?.id };
   }
 
@@ -285,6 +291,7 @@ export class ConclaveServer {
             role: body.role ? String(body.role) : undefined,
             canRun: body.canRun === true,
             zones: Array.isArray(body.zones) ? body.zones.map(String) : undefined,
+            pin: body.pin ? String(body.pin) : undefined,
             ttlMs: body.ttlMs ? Number(body.ttlMs) : undefined,
           });
           return send(200, { enrollToken: inv.token, id: inv.id, role: inv.role, canRun: inv.canRun, zones: inv.zones, expTs: inv.expTs });
@@ -358,7 +365,12 @@ export class ConclaveServer {
     if (req.method === "POST" && p === "/blobs") {
       const buf = await readBody(req, 64 * 1024 * 1024); // blobs are the data path — allow up to 64 MiB
       const sha = createHash("sha256").update(buf).digest("hex");
-      await fs.writeFile(path.join(this.blobsDir, sha), buf);
+      const file = path.join(this.blobsDir, sha);
+      if (!existsSync(file)) {
+        if (this.blobBytes + buf.length > this.maxBlobBytes) return send(507, { error: "blob store quota exceeded" });
+        await fs.writeFile(file, buf);
+        this.blobBytes += buf.length;
+      }
       return send(200, { sha256: sha, size: buf.length, uri: `conclave://blobs/${sha}` });
     }
     const blobM = p.match(/^\/blobs\/([a-f0-9]{64})$/);
@@ -382,6 +394,10 @@ export class ConclaveServer {
     const relayM = p.match(/^\/relay\/([A-Za-z0-9._-]{1,128})$/);
     if (relayM) {
       const ch = relayM[1];
+      // Cap concurrent rendezvous channels so a flood of half-open relays can't exhaust sockets/memory.
+      if (!this.waitingRecv.has(ch) && !this.waitingSend.has(ch) && this.waitingRecv.size + this.waitingSend.size >= this.maxRelayChannels) {
+        return send(429, { error: "too many open relay channels" });
+      }
       if (req.method === "GET") return this.relayReceive(ch, res, send);
       if (req.method === "PUT" || req.method === "POST") return this.relaySend(ch, req, send);
       return send(405, { error: "use GET to receive, PUT/POST to send" });
