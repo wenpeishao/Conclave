@@ -348,6 +348,21 @@ async function cmdEnroll(a: Args) {
   console.log(`[conclave] next: conclave work --as ${name} --url ${str(a, "url", "ws://127.0.0.1:8787")} --token ${token ?? "<token>"} --role ${j.role ?? "..."}`);
 }
 
+// The human cockpit: run a Conclave MCP server over stdio so a Claude Code instance becomes a
+// bus agent (tools: conclave_roster/send/inbox + inbound push). Uses the device identity/token.
+async function cmdMcp(a: Args) {
+  const name = str(a, "as") || os.hostname();
+  const host = buildHost(a, name); // identity + token + zone from flags / ~/.conclave/identity.json
+  const { buildConclaveMcpServer } = await import("./adapters/claude-code/adapter.js");
+  const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
+  const { server, setConnected } = buildConclaveMcpServer(host, { push: a["no-push"] !== true });
+  await host.start();
+  await server.connect(new StdioServerTransport());
+  setConnected(true);
+  // MUST log to stderr only — stdout is the MCP wire.
+  console.error(`[conclave-mcp] ${host.card.id} joined the bus as a Claude Code cockpit`);
+}
+
 async function cmdWork(a: Args) {
   const name = str(a, "as");
   if (!name) throw new Error("work requires --as <name>");
@@ -603,6 +618,8 @@ async function main() {
       return cmdKeygen(args);
     case "enroll":
       return cmdEnroll(args);
+    case "mcp":
+      return cmdMcp(args);
     default:
       help();
   }
