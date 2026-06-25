@@ -6,7 +6,8 @@ import { randomBytes, createHash } from "node:crypto";
 import { ConclaveServer } from "../src/server/conclave-server.js";
 import { NodeHost } from "../src/node/host.js";
 import { RelayWSTransport } from "../src/transports/relay-ws.js";
-import { TaskBoard } from "../src/agent/task-board.js";
+import { TaskBoard, reduceBoard, type BoardEvent } from "../src/agent/task-board.js";
+import { ulid } from "../src/core/ulid.js";
 import { TeamWorker } from "../src/agent/team-worker.js";
 import { AutonomousAgent, type Brain } from "../src/agent/runtime.js";
 import { echoBrain, ruleBrain } from "../src/agent/brains/rule.js";
@@ -280,6 +281,70 @@ test("use case: a board agent rebuilds its FULL board after a process restart (n
 
   await h2.stop();
   await hPost.stop();
+  await server.stop();
+});
+
+test("use case: an enrolled agent survives a server restart (durable registry)", async () => {
+  const dir = await tmpDir();
+  const s1 = new ConclaveServer({ wsPort: 0, httpPort: 0, dataDir: dir, token: CT, adminToken: AT });
+  await s1.start();
+  const wsPort = s1.wsPort();
+  const ag = await enroll(`http://127.0.0.1:${s1.httpPort()}`, "dura", "w", ["s"]);
+  await s1.stop(); // flush-on-stop must persist the just-enrolled agent
+
+  const s2 = new ConclaveServer({ wsPort, httpPort: 0, dataDir: dir, token: CT, adminToken: AT });
+  await s2.start();
+  const base2 = `http://127.0.0.1:${s2.httpPort()}`;
+  const h = await mkHost(`ws://127.0.0.1:${wsPort}`, ag, "s");
+  const b = new TaskBoard(h);
+  await h.start();
+  await wait(400);
+  const t = await b.add("ping", { for: "w" }); // a board op only an AUTHENTICATED agent can post
+  await until(async () => ((await (await fetch(`${base2}/tasks`, { headers: { authorization: `Bearer ${AT}` } })).json()) as { tasks: { id: string }[] }).tasks.some((x) => x.id === t), 4000);
+  await h.stop();
+  await s2.stop();
+});
+
+test("use case: a future-dated (clock-skewed) claim can be revoked (voids-by-eid)", () => {
+  const taskId = ulid();
+  const futureClaim = "ZZZZZZZZZZZZZZZZZZZZZZZZZZ"; // a ULID that sorts after any real release
+  const base: BoardEvent[] = [
+    { eid: taskId, from: "agent://lead", op: { op: "add", title: "x", for: "w" } },
+    { eid: futureClaim, from: "agent://skewed", op: { op: "claim", id: taskId } },
+  ];
+  assert.equal(reduceBoard(base).find((t) => t.id === taskId)?.status, "claimed");
+  // A plain release can't beat the future ULID, but a release naming the exact claim eid does.
+  const plain = [...base, { eid: ulid(), from: "agent://hub", op: { op: "release" as const, id: taskId } }];
+  assert.equal(reduceBoard(plain).find((t) => t.id === taskId)?.status, "claimed");
+  const exact = [...base, { eid: ulid(), from: "agent://hub", op: { op: "release" as const, id: taskId, voids: futureClaim } }];
+  assert.equal(reduceBoard(exact).find((t) => t.id === taskId)?.status, "open", "voids-by-eid frees even a future-dated claim");
+});
+
+test("use case: no task is orphaned under sustained load (ack-confirmed, paced)", async () => {
+  const { server, base, wsUrl } = await secureServer();
+  const N = 60;
+  const lead = await enroll(base, "lead", "lead", ["s"]);
+  const hLead = await mkHost(wsUrl, lead, "s");
+  const bLead = new TaskBoard(hLead);
+  const workers: TeamWorker[] = [];
+  for (let i = 0; i < 4; i++) {
+    const id = await enroll(base, `w${i}`, "w", ["s"]);
+    const h = await mkHost(wsUrl, id, "s");
+    workers.push(new TeamWorker(h, new TaskBoard(h), echoBrain(), { pollMs: 20, settleMs: 60, role: "w" }));
+  }
+  await Promise.all(workers.map((w) => w.start()));
+  await hLead.start();
+  await wait(250);
+  for (let i = 0; i < N; i++) {
+    await bLead.add(`task-${i}`, { for: "w" });
+    if (i % 20 === 19) await wait(120); // stay under the 300/s relay rate limit
+  }
+  await until(() => bLead.list().filter((t) => t.status === "done").length === N, 30000);
+  const board = bLead.list();
+  assert.equal(board.filter((t) => t.status === "done").length, N, "every posted task completes — none orphaned");
+  assert.equal(board.filter((t) => t.status === "claimed").length, 0, "nothing left stuck in claimed");
+  await Promise.all(workers.map((w) => w.stop()));
+  await hLead.stop();
   await server.stop();
 });
 

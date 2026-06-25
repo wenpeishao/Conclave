@@ -136,6 +136,12 @@ export class AgentRegistry {
     return this.agents.get(id);
   }
 
+  /** Await all queued writes — the registry is the auth source-of-truth, so callers must be able
+   *  to confirm an enrollment is durable (before answering /enroll) and flush it on shutdown. */
+  async flush(): Promise<void> {
+    await this.saveChain;
+  }
+
   list(): AgentRecord[] {
     return [...this.agents.values()];
   }

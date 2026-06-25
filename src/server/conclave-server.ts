@@ -145,6 +145,7 @@ export class ConclaveServer {
 
   async stop(): Promise<void> {
     await new Promise<void>((r) => (this.httpServer ? this.httpServer.close(() => r()) : r()));
+    if (this.registry) await this.registry.flush(); // never drop a just-enrolled agent on shutdown
     await this.host.stop();
     await this.relay.stop();
   }
@@ -299,6 +300,9 @@ export class ConclaveServer {
       if (!token || !publicKey) return send(400, { error: "token and publicKey required" });
       try {
         const rec = this.registry.enroll(token, publicKey, proof);
+        // Confirm the enrollment is DURABLE before telling the device it succeeded — otherwise a
+        // server restart can lose it and lock the (now-enrolled) device out of re-authentication.
+        await this.registry.flush();
         return send(200, { id: rec.id, name: rec.name, role: rec.role, canRun: rec.canRun, zones: rec.zones });
       } catch (e) {
         return send(400, { error: (e as Error).message });
@@ -343,7 +347,9 @@ export class ConclaveServer {
           const id = name.startsWith("agent://") ? name : `agent://${name}`;
           for (const [tid, owner] of this.claimedTasks) if (owner === id) this.claimedTasks.delete(tid);
           for (const t of this.board.list()) {
-            if (t.claimedBy === id && t.status === "claimed") void this.board.release(t.id);
+            // Void the EXACT claim eid so even a future-dated (clock-skewed) claim is freed — a
+            // plain release only voids claims older than itself, which a future ULID outranks.
+            if (t.claimedBy === id && t.status === "claimed") void this.board.release(t.id, t.claimEid);
           }
         }
         return send(ok ? 200 : 404, ok ? { revoked: true } : { error: "agent not found" });

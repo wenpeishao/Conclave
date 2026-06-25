@@ -20,7 +20,9 @@ export type TaskOp =
   | { op: "add"; title: string; for?: string } // `for` = required role/capability (role routing)
   | { op: "claim"; id: string }
   | { op: "done"; id: string; result?: string }
-  | { op: "release"; id: string }; // un-claim: voids claims/dones older than it (revoke / lease expiry)
+  // un-claim: `voids` names the exact claim eid to void (so even a future-dated claim is freed);
+  // without it, voids any claim/done older than the release itself.
+  | { op: "release"; id: string; voids?: string };
 
 export interface BoardEvent {
   eid: string; // the envelope ULID (global, time-sortable) — the convergence key
@@ -34,6 +36,7 @@ export interface Task {
   createdBy: string;
   status: "open" | "claimed" | "done";
   claimedBy?: string;
+  claimEid?: string; // the winning claim's envelope ULID (so a revoke can void that exact claim)
   result?: string;
   for?: string; // required role; only a worker with a matching role claims it (unset = anyone)
 }
@@ -56,7 +59,8 @@ export function reduceBoard(events: BoardEvent[]): Task[] {
   const adds = new Map<string, { eid: string; from: string; title: string; for?: string }[]>();
   const claims = new Map<string, { eid: string; from: string }[]>();
   const dones = new Map<string, { eid: string; from: string; result?: string }[]>();
-  const releases = new Map<string, string[]>(); // task id → release eids
+  const releases = new Map<string, string[]>(); // task id → release eids (void-older-than form)
+  const voided = new Set<string>(); // exact claim/done eids voided by a `voids` release
   const push = <T>(m: Map<string, T[]>, id: string, v: T) => {
     const arr = m.get(id);
     if (arr) arr.push(v);
@@ -67,17 +71,21 @@ export function reduceBoard(events: BoardEvent[]): Task[] {
     if (op.op === "add") push(adds, eid, { eid, from, title: op.title, for: op.for }); // task id = add envelope id
     else if (op.op === "claim") push(claims, op.id, { eid, from });
     else if (op.op === "done") push(dones, op.id, { eid, from, result: op.result });
-    else if (op.op === "release") push(releases, op.id, eid);
+    else if (op.op === "release") {
+      if (op.voids) voided.add(op.voids); // void that EXACT claim (works for a future-dated ULID)
+      else push(releases, op.id, eid); // else void anything older than this release
+    }
   }
 
   const tasks: Task[] = [];
   for (const [id, addList] of adds) {
     const add = minBy(addList, (x) => x.eid);
-    // A release voids any claim/done with an OLDER ULID, so the task re-opens and a newer claim
-    // (after the release) takes over. No release → "" → everything is valid (original behavior).
+    // A release voids matching claims/dones, so the task re-opens and a newer claim takes over.
+    // No release → "" + empty voided set → everything is valid (original behavior).
     const lastRelease = (releases.get(id) ?? []).reduce((a, b) => (b > a ? b : a), "");
-    const claimList = (claims.get(id) ?? []).filter((c) => c.eid > lastRelease);
-    const doneList = (dones.get(id) ?? []).filter((d) => d.eid > lastRelease);
+    const live = (x: { eid: string }) => x.eid > lastRelease && !voided.has(x.eid);
+    const claimList = (claims.get(id) ?? []).filter(live);
+    const doneList = (dones.get(id) ?? []).filter(live);
     const claim = claimList.length ? minBy(claimList, (x) => x.eid) : null;
     const done = doneList.length ? minBy(doneList, (x) => x.eid) : null;
     tasks.push({
@@ -85,6 +93,7 @@ export function reduceBoard(events: BoardEvent[]): Task[] {
       title: add.title,
       createdBy: add.from,
       claimedBy: claim?.from,
+      claimEid: claim?.eid,
       result: done?.result,
       status: done ? "done" : claim ? "claimed" : "open",
       for: add.for,
@@ -126,6 +135,7 @@ export class TaskBoard {
   }
 
   private pendingClaims = new Map<string, (v: "won" | "lost" | "timeout") => void>();
+  private pendingTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   private record(eid: string, from: string, op: TaskOp) {
     if (this.seen.has(eid)) return; // idempotent (a redelivery can't double-apply)
@@ -169,8 +179,8 @@ export class TaskBoard {
   }
 
   /** Un-claim a task so another worker can re-claim it (e.g. its claimer was revoked). */
-  async release(id: string): Promise<void> {
-    await this.publish({ op: "release", id });
+  async release(id: string, voids?: string): Promise<void> {
+    await this.publish(voids ? { op: "release", id, voids } : { op: "release", id });
   }
 
   list(): Task[] {
@@ -206,13 +216,22 @@ export class TaskBoard {
     this.record(env.id, env.from, { op: "claim", id: next.id }); // optimistic; undone if rejected
     const verdict = await new Promise<"won" | "lost" | "timeout">((resolve) => {
       this.pendingClaims.set(env.id, resolve);
-      setTimeout(() => {
-        if (this.pendingClaims.delete(env.id)) resolve("timeout");
-      }, Math.max(settleMs, 2500));
+      this.pendingTimers.set(
+        env.id,
+        setTimeout(() => {
+          if (this.pendingClaims.delete(env.id)) resolve("timeout");
+        }, Math.max(settleMs, 2500)),
+      );
     });
-    // Only run when positively confirmed the owner; a timeout (the server would have answered)
-    // is treated as not-owned to avoid double-execution.
-    return verdict === "won" ? (this.list().find((t) => t.id === next.id) ?? next) : null;
+    const timer = this.pendingTimers.get(env.id);
+    if (timer) clearTimeout(timer);
+    this.pendingTimers.delete(env.id);
+    if (verdict === "won") return this.list().find((t) => t.id === next.id) ?? next;
+    // Timeout (no verdict): undo the optimistic claim so the task re-opens locally and the worker
+    // re-attempts it next poll — otherwise a claim whose ack was lost orphans the task (it stays
+    // "claimed by us" locally but we never ran it). A reject already unrecords via onReject.
+    if (verdict === "timeout") this.unrecord(env.id);
+    return null;
   }
   onChange(cb: (board: Task[]) => void): void {
     this.listeners.push(cb);

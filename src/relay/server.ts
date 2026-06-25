@@ -270,11 +270,13 @@ export class RelayServer {
         return;
       }
     }
-    await this.publish(env);
-    // Positive ACK so a claimer knows it is the CONFIRMED owner. Only in authorized (secure)
-    // mode, where exactly one claim per task is accepted — in legacy mode there is no such
-    // server-side exclusivity, so we send no ack and the board falls back to min-ULID.
+    // Positive ACK so a claimer knows it is the CONFIRMED owner. Sent right after authorization
+    // (the claim is already accepted — claimedTasks is set in verify), NOT gated behind the
+    // durable append/broadcast, so a claimer isn't left waiting under load and orphaning the task.
+    // Only in authorized (secure) mode, where exactly one claim per task is accepted — in legacy
+    // mode there is no such server-side exclusivity, so the board falls back to min-ULID.
     if (wantAck && this.verify) sendFrame(ws, { t: "ack", id: env.id });
+    await this.publish(env);
   }
 
   private markRecent(id: string) {
