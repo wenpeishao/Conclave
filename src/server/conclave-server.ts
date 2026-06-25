@@ -128,8 +128,13 @@ export class ConclaveServer {
 
     this.httpServer = http.createServer((req, res) => {
       void this.handle(req, res).catch((e) => {
-        res.writeHead(500, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: (e as Error).message }));
+        // Map client-side faults to 4xx (don't 500 + echo internals): malformed JSON → 400,
+        // oversized body → 413, everything else → 500.
+        const msg = (e as Error)?.message ?? "error";
+        const code = e instanceof SyntaxError ? 400 : /exceeds \d+ bytes/.test(msg) ? 413 : 500;
+        const body = code === 400 ? "invalid JSON body" : code === 413 ? "request body too large" : msg;
+        if (!res.headersSent) res.writeHead(code, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: body }));
       });
     });
     await new Promise<void>((resolve, reject) => {

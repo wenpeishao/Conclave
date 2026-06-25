@@ -167,7 +167,21 @@ export class AgentRegistry {
       .then(async () => {
         const tmp = `${this.file}.${process.pid}.tmp`;
         await fs.writeFile(tmp, JSON.stringify(snapshot, null, 2));
-        await fs.rename(tmp, this.file);
+        // fs.rename can fail with EPERM/EACCES on Windows when the destination is momentarily
+        // held open (a reader, AV, indexer) — retry so a write isn't silently lost on restart.
+        for (let attempt = 0; ; attempt++) {
+          try {
+            await fs.rename(tmp, this.file);
+            return;
+          } catch (e) {
+            const code = (e as NodeJS.ErrnoException).code;
+            if ((code === "EPERM" || code === "EACCES" || code === "EBUSY") && attempt < 10) {
+              await new Promise((r) => setTimeout(r, 20 * (attempt + 1)));
+              continue;
+            }
+            throw e;
+          }
+        }
       })
       .catch((e) => console.error("[conclave] registry save error:", e));
     return this.saveChain;

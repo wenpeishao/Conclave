@@ -248,6 +248,19 @@ test("use case: the server board survives a relay restart (durable rebuild)", as
   await s2.stop();
 });
 
+test("use case: malformed HTTP input is refused cleanly (4xx, not a 500 crash)", async () => {
+  const { server, base } = await secureServer();
+  // Malformed JSON body → 400 with a generic message (no parser internals echoed), not 500.
+  const bad = await fetch(`${base}/admin/invite`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${AT}` }, body: "{not valid json" });
+  assert.equal(bad.status, 400, "malformed JSON → 400, not 500");
+  assert.equal(((await bad.json()) as { error: string }).error, "invalid JSON body");
+  // The server stays up and still serves a valid request afterward.
+  assert.equal((await fetch(`${base}/healthz`)).status, 200, "server survived the bad input");
+  const ok = await fetch(`${base}/admin/invite`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${AT}` }, body: JSON.stringify({ name: "ok" }) });
+  assert.equal(ok.status, 200, "valid request still works after the malformed one");
+  await server.stop();
+});
+
 test("use case: heterogeneous brains answer on one secure bus", async () => {
   const { server, base, wsUrl } = await secureServer();
   const echoId = await enroll(base, "echoA");
