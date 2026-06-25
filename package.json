@@ -32,8 +32,8 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test --test-force-exit test/*.test.ts",
-    "test:live": "node --import tsx --test --test-force-exit test/live/*.test.ts",
+    "test": "node --import tsx --test --test-concurrency=1 --test-force-exit test/*.test.ts",
+    "test:live": "node --import tsx --test --test-concurrency=1 --test-force-exit test/live/*.test.ts",
     "example": "tsx examples/api-alignment/demo.ts",
     "conclave": "tsx src/cli.ts"
   },

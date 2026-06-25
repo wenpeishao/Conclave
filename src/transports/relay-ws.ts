@@ -57,7 +57,7 @@ export class RelayWSTransport implements Transport {
         settle();
       });
       ws.on("message", (d) => {
-        let m: { t?: string; env?: Envelope; cursor?: string | null };
+        let m: { t?: string; env?: Envelope; cursor?: string | null; reason?: string };
         try {
           m = JSON.parse(d.toString());
         } catch {
@@ -66,6 +66,8 @@ export class RelayWSTransport implements Transport {
         if (m.t === "env" && m.env) {
           this.cursor = m.cursor ?? this.cursor;
           this.handler?.(m.env, this.cursor);
+        } else if (m.t === "err") {
+          console.error(`[conclave] relay rejected a message: ${m.reason ?? "unauthorized"}`);
         }
       });
       ws.on("close", () => {

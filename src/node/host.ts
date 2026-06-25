@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { Transport } from "../core/transport.js";
 import type { Envelope, AgentCard, Kind, Artifact } from "../core/types.js";
 import { makeEnvelope, deliverableTo } from "../core/envelope.js";
+import { signEnvelope, type Identity } from "../core/identity.js";
 
 /**
  * NodeHost — the per-device daemon. Bare process, NO Docker. It wraps one Transport
@@ -20,6 +21,7 @@ export interface HostOpts {
   dataDir: string; // per-agent state lands in dataDir/<name>/
   topics?: string[]; // topic:// addresses to receive (presence is always handled)
   heartbeatMs?: number;
+  identity?: Identity; // if set, every outgoing envelope is ed25519-signed
 }
 
 type MsgHandler = (e: Envelope) => void | Promise<void>;
@@ -37,6 +39,7 @@ export class NodeHost {
   private dataDir: string;
   private topics: Set<string>;
   private heartbeatMs: number;
+  private identity?: Identity;
 
   private seq = 0;
   private cursor: string | null = null;
@@ -54,6 +57,7 @@ export class NodeHost {
     this.dataDir = path.join(o.dataDir, sanitize(o.card.name));
     this.topics = new Set(o.topics ?? []);
     this.heartbeatMs = o.heartbeatMs ?? 10000;
+    this.identity = o.identity;
   }
 
   /** Register a sink for messages addressed to this agent. */
@@ -105,7 +109,8 @@ export class NodeHost {
       artifacts?: Artifact[];
     } = {},
   ): Promise<Envelope> {
-    const env = makeEnvelope({ from: this.card.id, to, seq: ++this.seq, ...opts });
+    let env = makeEnvelope({ from: this.card.id, to, seq: ++this.seq, ...opts });
+    if (this.identity) env = signEnvelope(env, this.identity.privateKey);
     this.markSeen(env.id); // never deliver our own message back to ourselves
     await this.append("outbound.ndjson", env);
     this.scheduleSave();
@@ -145,12 +150,13 @@ export class NodeHost {
   }
 
   private async announce() {
-    const env = makeEnvelope({
+    let env = makeEnvelope({
       from: this.card.id,
       to: ["topic://presence"],
       kind: "presence",
       body: this.card,
     });
+    if (this.identity) env = signEnvelope(env, this.identity.privateKey);
     try {
       await this.t.publish(env);
     } catch {

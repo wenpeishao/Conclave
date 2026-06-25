@@ -32,11 +32,17 @@ export class RelayServer {
   private count = 0;
   private appendChain: Promise<void> = Promise.resolve();
   private token?: string;
+  private verify?: (env: Envelope) => { ok: boolean; reason?: string } | Promise<{ ok: boolean; reason?: string }>;
 
   constructor(o: RelayOpts) {
     this.wantPort = o.port;
     this.logFile = o.logFile;
     this.token = o.token;
+  }
+
+  /** Install an authorization gate: a publish that fails it is dropped (never logged or broadcast). */
+  onVerify(fn: (env: Envelope) => { ok: boolean; reason?: string } | Promise<{ ok: boolean; reason?: string }>) {
+    this.verify = fn;
   }
 
   port(): number {
@@ -78,7 +84,7 @@ export class RelayServer {
         return;
       }
       if (msg.t === "hello") void this.replay(ws, msg.cursor ?? null);
-      else if (msg.t === "pub" && msg.env) void this.publish(msg.env);
+      else if (msg.t === "pub" && msg.env) void this.handlePub(ws, msg.env);
     });
     ws.on("close", () => this.clients.delete(ws));
     ws.on("error", () => this.clients.delete(ws));
@@ -101,6 +107,18 @@ export class RelayServer {
     }
   }
 
+  private async handlePub(ws: WebSocket, env: Envelope): Promise<void> {
+    if (this.verify) {
+      const v = await this.verify(env);
+      if (!v.ok) {
+        // Tell the sender its message was rejected, then drop it.
+        sendFrame(ws, { t: "err", reason: v.reason ?? "unauthorized", id: env.id });
+        return;
+      }
+    }
+    await this.publish(env);
+  }
+
   private publish(env: Envelope): Promise<void> {
     // Serialize appends so line index == cursor stays consistent under concurrency.
     this.appendChain = this.appendChain.then(async () => {
@@ -113,7 +131,11 @@ export class RelayServer {
   }
 }
 
-function sendFrame(ws: WebSocket, frame: { t: "env"; env: Envelope; cursor: string }) {
+type ServerFrame =
+  | { t: "env"; env: Envelope; cursor: string }
+  | { t: "err"; reason: string; id?: string };
+
+function sendFrame(ws: WebSocket, frame: ServerFrame) {
   ws.send(JSON.stringify(frame));
 }
 

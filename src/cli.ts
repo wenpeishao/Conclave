@@ -2,11 +2,13 @@
 import * as path from "node:path";
 import * as os from "node:os";
 import * as readline from "node:readline";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { RelayServer } from "./relay/server.js";
 import { NodeHost } from "./node/host.js";
 import { buildTransport, type TransportConfig } from "./node/build.js";
 import { AutonomousAgent } from "./agent/runtime.js";
 import { echoBrain } from "./agent/brains/rule.js";
+import { generateIdentity, type Identity } from "./core/identity.js";
 import type { AgentCard, Envelope } from "./core/types.js";
 
 type Args = Record<string, string | boolean>;
@@ -51,6 +53,28 @@ function transportFromArgs(a: Args, agentName: string): TransportConfig {
   return { kind: "relay", url: str(a, "url", "ws://127.0.0.1:8787"), token: str(a, "token") || process.env.CONCLAVE_TOKEN || undefined };
 }
 
+/** Load this device's enrolled identity (from --identity <file> or <data>/identity.json), if any. */
+function deviceIdentity(a: Args): Identity | undefined {
+  if (str(a, "identity") === "none") return undefined;
+  const file = str(a, "identity") || path.join(dataHome(a), "identity.json");
+  try {
+    return JSON.parse(readFileSync(file, "utf8")) as Identity;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Build a NodeHost, reconciling the card id/name to the enrolled identity when present. */
+function buildHost(a: Args, name: string, transport: ReturnType<typeof buildTransport>): NodeHost {
+  const ident = deviceIdentity(a);
+  const card = makeCard(a, name);
+  if (ident) {
+    card.id = ident.id;
+    card.name = ident.name;
+  }
+  return new NodeHost({ card, transport, dataDir: dataHome(a), identity: ident });
+}
+
 function makeCard(a: Args, name: string): AgentCard {
   // Default id is the bare name so `--to <name>` just works. Pass --id agent://name@host
   // explicitly when you need to disambiguate two agents that share a name across devices.
@@ -83,11 +107,12 @@ function printIncoming(e: Envelope) {
 }
 
 async function cmdJoin(a: Args) {
+  if (str(a, "enroll")) return cmdEnroll(a); // `join --enroll <token>` = device enrollment
   const name = str(a, "as");
   if (!name) throw new Error("join requires --as <name>");
-  const card = makeCard(a, name);
   const transport = buildTransport(transportFromArgs(a, name));
-  const host = new NodeHost({ card, transport, dataDir: dataHome(a) });
+  const host = buildHost(a, name, transport);
+  const card = host.card;
   host.onMessage((e) => printIncoming(e));
   await host.start();
   console.log(`[conclave] joined as ${card.id}`);
@@ -148,8 +173,7 @@ async function cmdSend(a: Args) {
 async function cmdAgent(a: Args) {
   const name = str(a, "as");
   if (!name) throw new Error("agent requires --as <name>");
-  const card = makeCard(a, name);
-  const host = new NodeHost({ card, transport: buildTransport(transportFromArgs(a, name)), dataDir: dataHome(a) });
+  const host = buildHost(a, name, buildTransport(transportFromArgs(a, name)));
   const brainKind = str(a, "brain", "echo");
   let brain;
   if (brainKind === "anthropic") {
@@ -205,7 +229,7 @@ async function cmdAgent(a: Args) {
 
   const agent = new AutonomousAgent(host, brain, agentOpts);
   await agent.start();
-  console.log(`[conclave] autonomous agent ${card.id} running with '${brainKind}' brain${a["guard"] ? ` (guard=${a["guard"]})` : ""}`);
+  console.log(`[conclave] autonomous agent ${host.card.id} running with '${brainKind}' brain${a["guard"] ? ` (guard=${a["guard"]})` : ""}`);
   console.log("[conclave] it will react to incoming messages. Ctrl-C to stop.");
   process.on("SIGINT", () => {
     void agent.stop().then(() => process.exit(0));
@@ -217,24 +241,85 @@ async function cmdServe(a: Args) {
   const httpPort = a["http"] ? Number(a["http"]) : 8088;
   const dataDir = str(a, "data", path.join(dataHome(a), "server"));
   const token = str(a, "token") || process.env.CONCLAVE_TOKEN || undefined;
+  const adminToken = str(a, "admin-token") || process.env.CONCLAVE_ADMIN_TOKEN || undefined;
   const { ConclaveServer } = await import("./server/conclave-server.js");
-  const server = new ConclaveServer({ wsPort, httpPort, dataDir, token });
+  const server = new ConclaveServer({ wsPort, httpPort, dataDir, token, adminToken });
   await server.start();
-  console.log(`[conclave] server up${token ? " (auth: token required)" : " (NO AUTH — set --token / CONCLAVE_TOKEN before exposing)"}`);
+  const mode = adminToken
+    ? "SECURE (per-agent signed identities required)"
+    : token
+      ? "auth: shared token"
+      : "NO AUTH — set --token / --admin-token before exposing";
+  console.log(`[conclave] server up [${mode}]`);
   console.log(`[conclave]   bus  (agents):   ws://0.0.0.0:${server.wsPort()}`);
   console.log(`[conclave]   http (api/data): http://0.0.0.0:${server.httpPort()}`);
   console.log(`[conclave]   tasks: GET/POST /tasks · history: GET /messages · data: POST/GET /blobs`);
+  if (adminToken) console.log(`[conclave]   onboard: conclave invite --role <r> · device: conclave join --enroll <token>`);
   console.log(`[conclave]   data dir: ${dataDir}`);
   process.on("SIGINT", () => {
     void server.stop().then(() => process.exit(0));
   });
 }
 
+function httpBase(a: Args): string {
+  // Derive the HTTP API base from the ws --url (ws://host:8787 -> http://host:8088), or --http-url.
+  if (str(a, "http-url")) return str(a, "http-url").replace(/\/$/, "");
+  const ws = str(a, "url", "ws://127.0.0.1:8787");
+  const m = ws.match(/^wss?:\/\/([^/:]+)(?::(\d+))?/);
+  const host = m?.[1] ?? "127.0.0.1";
+  const scheme = ws.startsWith("wss") ? "https" : "http";
+  const httpPort = str(a, "http-port", "8088");
+  return `${scheme}://${host}:${httpPort}`;
+}
+
+// Admin: mint a one-time enrollment token for a new agent identity.
+async function cmdInvite(a: Args) {
+  const name = str(a, "as") || str(a, "name");
+  if (!name) throw new Error("invite requires --as <agent-name>");
+  const admin = str(a, "admin-token") || process.env.CONCLAVE_ADMIN_TOKEN;
+  if (!admin) throw new Error("invite requires --admin-token (or CONCLAVE_ADMIN_TOKEN)");
+  const base = httpBase(a);
+  const res = await fetch(`${base}/admin/invite`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${admin}` },
+    body: JSON.stringify({ name, role: str(a, "role") || undefined, canRun: a["can-run"] === true }),
+  });
+  const j = (await res.json()) as { enrollToken?: string; error?: string; role?: string; canRun?: boolean };
+  if (!res.ok) throw new Error(`invite failed: ${j.error ?? res.status}`);
+  const wsUrl = str(a, "url", "ws://127.0.0.1:8787");
+  const token = str(a, "token") || process.env.CONCLAVE_TOKEN || "<connect-token>";
+  console.log(`[conclave] invited agent://${name} (role=${j.role ?? "-"}, canRun=${j.canRun ?? false})`);
+  console.log(`\nGive this to the device — it enrolls a local keypair (private key never leaves it):\n`);
+  console.log(`  conclave join --as ${name} --url ${wsUrl} --token ${token} --enroll ${j.enrollToken}\n`);
+}
+
+// Device: redeem an enrollment token — generate a local keypair, register the public key, save identity.
+async function cmdEnroll(a: Args) {
+  const enroll = str(a, "enroll");
+  const name = str(a, "as");
+  if (!enroll || !name) throw new Error("join requires --as <name> --enroll <token>");
+  const base = httpBase(a);
+  const token = str(a, "token") || process.env.CONCLAVE_TOKEN;
+  const ident = generateIdentity(name);
+  const res = await fetch(`${base}/enroll`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    body: JSON.stringify({ token: enroll, publicKey: ident.publicKey }),
+  });
+  const j = (await res.json()) as { id?: string; role?: string; canRun?: boolean; error?: string };
+  if (!res.ok) throw new Error(`enroll failed: ${j.error ?? res.status}`);
+  const file = str(a, "identity") || path.join(dataHome(a), "identity.json");
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify(ident, null, 2));
+  console.log(`[conclave] enrolled ${j.id} (role=${j.role ?? "-"}, canRun=${j.canRun ?? false})`);
+  console.log(`[conclave] identity saved to ${file} — this device can now sign as ${j.id}.`);
+  console.log(`[conclave] next: conclave work --as ${name} --url ${str(a, "url", "ws://127.0.0.1:8787")} --token ${token ?? "<token>"} --role ${j.role ?? "..."}`);
+}
+
 async function cmdWork(a: Args) {
   const name = str(a, "as");
   if (!name) throw new Error("work requires --as <name>");
-  const card = makeCard(a, name);
-  const host = new NodeHost({ card, transport: buildTransport(transportFromArgs(a, name)), dataDir: dataHome(a) });
+  const host = buildHost(a, name, buildTransport(transportFromArgs(a, name)));
   const { TaskBoard } = await import("./agent/task-board.js");
   const { TeamWorker } = await import("./agent/team-worker.js");
   const board = new TaskBoard(host);
@@ -259,7 +344,7 @@ async function cmdWork(a: Args) {
     },
   });
   await worker.start();
-  console.log(`[conclave] team worker ${card.id} (${brainKind}) working the shared board. Ctrl-C to stop.`);
+  console.log(`[conclave] team worker ${host.card.id} (${brainKind}) working the shared board. Ctrl-C to stop.`);
   process.on("SIGINT", () => {
     void worker.stop().then(() => process.exit(0));
   });
@@ -268,8 +353,7 @@ async function cmdWork(a: Args) {
 async function cmdBoard(a: Args) {
   const sub = str(a, "_sub") || "list"; // set by main() from the positional arg
   const name = str(a, "as", "board-cli");
-  const card = makeCard(a, name);
-  const host = new NodeHost({ card, transport: buildTransport(transportFromArgs(a, name)), dataDir: dataHome(a) });
+  const host = buildHost(a, name, buildTransport(transportFromArgs(a, name)));
   const { TaskBoard } = await import("./agent/task-board.js");
   const board = new TaskBoard(host);
   await host.start();
@@ -399,10 +483,19 @@ function help() {
   conclave up    [--port 8787] [--log <file>]
         start a bare relay (durable WebSocket hub).
 
-  conclave serve [--port 8787] [--http 8088] [--data <dir>]
+  conclave serve [--port 8787] [--http 8088] [--data <dir>] [--token <t>] [--admin-token <a>]
         full coordination server: WS bus + HTTP API for tasks (GET/POST /tasks),
-        conversation history (GET /messages), and data exchange (POST/GET /blobs,
-        content-addressed by sha256). Deploy where both sides can reach it.
+        conversation history (GET /messages), and data exchange (POST/GET /blobs).
+        --admin-token turns on SECURE MODE: per-agent enrolled identities + signed
+        envelopes required. Deploy where both sides can reach it.
+
+  conclave invite --as <name> [--role r] [--can-run] --admin-token <a> --url ws://host:8787
+        (admin) mint a one-time enrollment token for a new agent; prints the device's join command.
+
+  conclave join  --as <name> --enroll <token> --url ws://host:8787 --token <t>
+        (device) redeem an enrollment token: generate a local ed25519 keypair, register the
+        public key, save the identity. The private key never leaves the device. Afterwards
+        every message this device sends is signed; a stolen relay token alone can't act as it.
 
   conclave join  --as <name> [--transport relay|git]
                  [--url ws://host:port]                       (relay)
@@ -472,6 +565,10 @@ async function main() {
       return cmdWork(args);
     case "serve":
       return cmdServe(args);
+    case "invite":
+      return cmdInvite(args);
+    case "enroll":
+      return cmdEnroll(args);
     default:
       help();
   }

@@ -8,6 +8,8 @@ import { NodeHost } from "../node/host.js";
 import { RelayWSTransport } from "../transports/relay-ws.js";
 import { TaskBoard, type Task } from "../agent/task-board.js";
 import type { Envelope } from "../core/types.js";
+import { AgentRegistry } from "./registry.js";
+import { generateIdentity, type Identity } from "../core/identity.js";
 
 /**
  * ConclaveServer — a deployable coordination backend. One process, three jobs:
@@ -29,6 +31,8 @@ export interface ConclaveServerOpts {
   httpPort: number; // 0 = pick free
   dataDir: string; // holds relay.log, blobs/, board host state
   token?: string; // shared secret; if set, WS + HTTP both require it
+  adminToken?: string; // if set, turns on SECURE MODE: per-agent enrolled identities +
+  // ed25519-signed envelopes are required, and /admin/* endpoints are gated by this token
 }
 
 export class ConclaveServer {
@@ -41,6 +45,9 @@ export class ConclaveServer {
   private dataDir: string;
   private wantHttpPort: number;
   private token?: string;
+  private adminToken?: string;
+  private registry?: AgentRegistry;
+  private hubIdentity?: Identity;
   // Streaming relay rendezvous: a channel waits for its other half, then bytes pipe
   // straight through (sender request body -> receiver response body). Nothing is stored.
   private waitingRecv = new Map<string, http.ServerResponse>();
@@ -53,6 +60,7 @@ export class ConclaveServer {
     this.blobsDir = path.join(o.dataDir, "blobs");
     this.wantHttpPort = o.httpPort;
     this.token = o.token;
+    this.adminToken = o.adminToken;
     this.relay = new RelayServer({ port: o.wsPort, logFile: this.logFile, token: o.token });
     // The internal board participant is wired after the relay is up (needs its port).
     this.host = null as unknown as NodeHost;
@@ -69,6 +77,21 @@ export class ConclaveServer {
 
   async start(): Promise<void> {
     await fs.mkdir(this.blobsDir, { recursive: true });
+
+    // SECURE MODE: an admin token turns on per-agent identity + signature enforcement.
+    if (this.adminToken) {
+      this.registry = new AgentRegistry(this.dataDir);
+      await this.registry.load();
+      this.hubIdentity = await this.loadOrMakeHubIdentity();
+      // Trust the hub's own key so its presence/board envelopes pass verification.
+      if (!this.registry.get(this.hubIdentity.id)) {
+        const inv = this.registry.invite({ name: "hub", role: "server", canRun: true });
+        this.registry.enroll(inv.token, this.hubIdentity.publicKey);
+      }
+      // Gate every publish on a valid signature from a known, non-revoked agent.
+      this.relay.onVerify((env) => this.registry!.authorize(env));
+    }
+
     await this.relay.start();
     // A loopback bus participant that owns the canonical board view.
     this.host = new NodeHost({
@@ -76,6 +99,7 @@ export class ConclaveServer {
       transport: new RelayWSTransport(`ws://127.0.0.1:${this.relay.port()}`, this.token),
       dataDir: path.join(this.dataDir, "hub"),
       heartbeatMs: 15000,
+      identity: this.hubIdentity,
     });
     this.board = new TaskBoard(this.host);
     await this.host.start();
@@ -98,6 +122,17 @@ export class ConclaveServer {
     await this.relay.stop();
   }
 
+  private async loadOrMakeHubIdentity(): Promise<Identity> {
+    const file = path.join(this.dataDir, "hub-identity.json");
+    try {
+      return JSON.parse(await fs.readFile(file, "utf8")) as Identity;
+    } catch {
+      const id = generateIdentity("hub");
+      await fs.writeFile(file, JSON.stringify(id));
+      return id;
+    }
+  }
+
   // ---- HTTP API ----------------------------------------------------------
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -111,17 +146,70 @@ export class ConclaveServer {
     if (req.method === "GET" && p === "/healthz") return send(200, { ok: true });
 
     // Shared-token auth (Authorization: Bearer <t>, or x-conclave-token, or ?token=).
-    if (this.token) {
+    // Admin + enrollment endpoints carry their OWN credentials (admin token / one-time
+    // enrollment token), so they bypass the coarse connect-token gate.
+    const selfAuthed = p === "/enroll" || p.startsWith("/admin/");
+    if (this.token && !selfAuthed) {
       const auth = req.headers["authorization"];
       const bearer = typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : undefined;
       const got = bearer ?? (req.headers["x-conclave-token"] as string | undefined) ?? url.searchParams.get("token") ?? undefined;
       if (got !== this.token) return send(401, { error: "unauthorized" });
     }
 
+    // --- identity / enrollment (secure mode) ---
+    // Device redeems a one-time enrollment token by registering its public key.
+    if (req.method === "POST" && p === "/enroll") {
+      if (!this.registry) return send(409, { error: "server not in secure mode" });
+      const body = await readJson(req);
+      const token = String(body.token ?? "");
+      const publicKey = String(body.publicKey ?? "");
+      if (!token || !publicKey) return send(400, { error: "token and publicKey required" });
+      try {
+        const rec = this.registry.enroll(token, publicKey);
+        return send(200, { id: rec.id, name: rec.name, role: rec.role, canRun: rec.canRun });
+      } catch (e) {
+        return send(400, { error: (e as Error).message });
+      }
+    }
+    // Admin endpoints — gated by the admin token (x-conclave-admin or Bearer).
+    if (p === "/admin/invite" || p === "/admin/revoke" || p === "/admin/agents") {
+      if (!this.registry || !this.adminToken) return send(409, { error: "server not in secure mode" });
+      const auth = req.headers["authorization"];
+      const bearer = typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : undefined;
+      const admin = (req.headers["x-conclave-admin"] as string | undefined) ?? bearer;
+      if (admin !== this.adminToken) return send(401, { error: "admin token required" });
+
+      if (req.method === "GET" && p === "/admin/agents") {
+        return send(200, { agents: this.registry.list() });
+      }
+      if (req.method === "POST" && p === "/admin/invite") {
+        const body = await readJson(req);
+        if (!body.name) return send(400, { error: "name required" });
+        try {
+          const inv = this.registry.invite({
+            name: String(body.name),
+            role: body.role ? String(body.role) : undefined,
+            canRun: body.canRun === true,
+            ttlMs: body.ttlMs ? Number(body.ttlMs) : undefined,
+          });
+          return send(200, { enrollToken: inv.token, id: inv.id, role: inv.role, canRun: inv.canRun, expTs: inv.expTs });
+        } catch (e) {
+          return send(400, { error: (e as Error).message });
+        }
+      }
+      if (req.method === "POST" && p === "/admin/revoke") {
+        const body = await readJson(req);
+        const ok = this.registry.revoke(String(body.name ?? ""));
+        return send(ok ? 200 : 404, ok ? { revoked: true } : { error: "agent not found" });
+      }
+      return send(405, { error: "method not allowed" });
+    }
+
     // status
     if (req.method === "GET" && p === "/") {
       return send(200, {
         service: "conclave-server",
+        secure: !!this.registry,
         ws: `ws://0.0.0.0:${this.wsPort()}`,
         roster: this.host.getRoster(),
         tasks: this.board.list().length,
