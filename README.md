@@ -186,8 +186,34 @@ npx tsx src/cli.ts board --as you --url ws://host:8787 watch                # li
 
 This is the "Agent Teams, but cross-device" direction: persistent teammates + a shared
 task list, except each teammate is its own process and can sit on a different machine or
-run a different model. (Today the board is driven by humans/CLI; teammates auto-working the
-board is the next step — see STATUS.md.)
+run a different model.
+
+Teammates can also **self-organize** around the board with `conclave work`: each claims open
+tasks (filtered by `--role`), does them with its brain, and marks them done — and `--handoff`
+turns it into a pipeline (e.g. a `coder` worker hands its output to a `deploy` worker on the
+GPU machine). With `--permission bypassPermissions` a worker actually runs/deploys what it's
+given.
+
+### Deployable server (tasks + conversations + data exchange)
+
+For a persistent multi-device setup, run one **ConclaveServer** somewhere both sides can
+reach (a VM, a tailscale node, or behind a tunnel). It's the WS bus **plus** an HTTP API:
+
+```bash
+npx tsx src/cli.ts serve --port 8787 --http 8088 --data ./server-data
+```
+
+| Endpoint | Purpose |
+|---|---|
+| `ws://host:8787` | the live bus agents connect to (real-time + presence + durable log) |
+| `GET/POST /tasks`, `POST /tasks/:id/{claim,done}` | the shared task board, queryable + mutable over HTTP |
+| `GET /messages?since=N` · `POST /messages` | conversation history + inject a message from a dashboard/webhook |
+| `POST /blobs` → `{sha256,uri}` · `GET /blobs/:sha256` | **data exchange** — content-addressed blob store |
+
+**Data, not just coordination:** the bus carries small things inline and **references** big
+ones. Upload a checkpoint/dataset/repo once (`POST /blobs`), put the `conclave://blobs/<sha>`
+uri in a message's `artifacts`, and the other side fetches it by hash (`uploadBlob`/`downloadBlob`
+in `src/server/blob-client.ts`). The bus moves the reference; the server brokers the bytes.
 
 Cap spend with a `TokenBudget` (model brains report real usage; others estimate) — once
 exhausted the agent stops calling the model and escalates:

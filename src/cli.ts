@@ -212,6 +212,23 @@ async function cmdAgent(a: Args) {
   });
 }
 
+async function cmdServe(a: Args) {
+  const wsPort = a["port"] ? Number(a["port"]) : 8787;
+  const httpPort = a["http"] ? Number(a["http"]) : 8088;
+  const dataDir = str(a, "data", path.join(dataHome(a), "server"));
+  const { ConclaveServer } = await import("./server/conclave-server.js");
+  const server = new ConclaveServer({ wsPort, httpPort, dataDir });
+  await server.start();
+  console.log(`[conclave] server up`);
+  console.log(`[conclave]   bus  (agents):   ws://0.0.0.0:${server.wsPort()}`);
+  console.log(`[conclave]   http (api/data): http://0.0.0.0:${server.httpPort()}`);
+  console.log(`[conclave]   tasks: GET/POST /tasks · history: GET /messages · data: POST/GET /blobs`);
+  console.log(`[conclave]   data dir: ${dataDir}`);
+  process.on("SIGINT", () => {
+    void server.stop().then(() => process.exit(0));
+  });
+}
+
 async function cmdWork(a: Args) {
   const name = str(a, "as");
   if (!name) throw new Error("work requires --as <name>");
@@ -378,7 +395,12 @@ function help() {
   console.log(`conclave - cross-device agent bus
 
   conclave up    [--port 8787] [--log <file>]
-        start a relay (durable WebSocket hub).
+        start a bare relay (durable WebSocket hub).
+
+  conclave serve [--port 8787] [--http 8088] [--data <dir>]
+        full coordination server: WS bus + HTTP API for tasks (GET/POST /tasks),
+        conversation history (GET /messages), and data exchange (POST/GET /blobs,
+        content-addressed by sha256). Deploy where both sides can reach it.
 
   conclave join  --as <name> [--transport relay|git]
                  [--url ws://host:port]                       (relay)
@@ -446,6 +468,8 @@ async function main() {
       return cmdBoard(args);
     case "work":
       return cmdWork(args);
+    case "serve":
+      return cmdServe(args);
     default:
       help();
   }

@@ -26,6 +26,10 @@ Everything below is **implemented and tested**, not aspirational.
 | Cross-process board over a live relay (`conclave board` add/claim/done) | ✅ | live (fresh process reconstructs board from relay log) |
 | **`conclave team`** one-command launcher (relay + Claude teammates) | ✅ | manual |
 | RelayWS drains send buffer before close (one-shot publishes not lost) | ✅ | live board demo |
+| **Role routing + pipeline handoff** (`work --role/--handoff`) | ✅ | `test/team-worker.test.ts` |
+| **claude brain `--permission`** (deployer can run/deploy) | ✅ | live (home ran on the 5090) |
+| **ConclaveServer** (`serve`): HTTP tasks + conversation history + blob data-exchange | ✅ | `test/conclave-server.test.ts` (31/31) |
+| Live cross-machine pipeline (lab coder → home deployer ran on RTX 5090) | ✅ | live |
 | **CLI-shim brain** (generic subprocess) + **codex/gemini presets** | ✅ | `test/cli-brain.test.ts` |
 | Subprocess-driven agent answering on the bus (arg + stdin modes) | ✅ | cli-brain |
 | CLI-shim failure → no-op (missing binary doesn't crash) | ✅ | cli-brain |
