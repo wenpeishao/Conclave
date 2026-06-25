@@ -19,9 +19,9 @@ test("ulid: decodeUlidTime recovers the timestamp and rejects forgeries", () => 
   // The relay binds env.id's embedded time to the freshness window; a forged tiny id decodes
   // to a far-past time and is rejected, defeating the min-ULID board-claim hijack.
   assert.equal(decodeUlidTime(ulid(1700000000000)), 1700000000000);
-  assert.equal(decodeUlidTime("0000000000000000000000000"), 0, "forged '000…' decodes to epoch 0");
-  assert.ok(Number.isNaN(decodeUlidTime("not-a-ulid")), "malformed id → NaN");
-  assert.ok(Number.isNaN(decodeUlidTime("00000000000000000000000I!")), "out-of-alphabet → NaN");
+  assert.equal(decodeUlidTime("0".repeat(26)), 0, "forged all-zero ULID decodes to epoch 0 (far past → relay rejects)");
+  assert.ok(Number.isNaN(decodeUlidTime("not-a-ulid")), "wrong length → NaN (relay rejects)");
+  assert.ok(Number.isNaN(decodeUlidTime("0".repeat(24) + "IL")), "out-of-alphabet chars → NaN");
 });
 
 test("envelope: make + validate + addressing", () => {
