@@ -4,7 +4,9 @@ import { ConclaveServer } from "../src/server/conclave-server.js";
 import { NodeHost } from "../src/node/host.js";
 import { RelayWSTransport } from "../src/transports/relay-ws.js";
 import { TaskBoard } from "../src/agent/task-board.js";
-import { generateIdentity, signData, type Identity } from "../src/core/identity.js";
+import { generateIdentity, signData, signEnvelope, type Identity } from "../src/core/identity.js";
+import { makeEnvelope } from "../src/core/envelope.js";
+import { ulid } from "../src/core/ulid.js";
 import { tmpDir, until, wait } from "./helpers.js";
 
 const CT = "connect-token";
@@ -72,5 +74,51 @@ test("authz: a wrong-role agent cannot claim a role-tagged task; the right role 
 
   await dep.host.stop();
   await rev.host.stop();
+  await server.stop();
+});
+
+test("authz: a forged minimal-ULID claim cannot hijack ownership (first-claim-wins)", async () => {
+  const dir = await tmpDir();
+  const server = new ConclaveServer({ wsPort: 0, httpPort: 0, dataDir: dir, token: CT, adminToken: AT });
+  await server.start();
+  const base = `http://127.0.0.1:${server.httpPort()}`;
+  const wsUrl = `ws://127.0.0.1:${server.wsPort()}`;
+
+  const aliceId = await enrollRole(base, "alice", "worker");
+  const malloryId = await enrollRole(base, "mallory", "worker"); // same role → in-scope attacker
+
+  const alice = new NodeHost({ card: { id: aliceId.id, name: "alice" }, transport: new RelayWSTransport(wsUrl, CT, aliceId), dataDir: await tmpDir(), identity: aliceId, heartbeatMs: 60000 });
+  const aliceBoard = new TaskBoard(alice);
+  await alice.start();
+
+  const created = (await (await fetch(`${base}/tasks`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${AT}` }, body: JSON.stringify({ title: "run job", for: "worker" }) })).json()) as { id: string };
+  await until(async () => (await taskById(base, created.id)) !== undefined, 4000);
+
+  // Alice legitimately claims it.
+  await aliceBoard.claim(created.id);
+  await until(async () => (await taskById(base, created.id))?.claimedBy === "agent://alice", 4000);
+
+  // Mallory (same role) forges a claim with a minimal ULID (fresh time, all-zero random suffix)
+  // that would win the old min-ULID tie-break, and publishes it on a raw authenticated socket.
+  const mt = new RelayWSTransport(wsUrl, CT, malloryId);
+  mt.onEnvelope(() => {});
+  await mt.start(null);
+  await wait(300); // let the challenge-response bind the connection
+  const forge = (op: "claim" | "done", result?: string) => {
+    let e = makeEnvelope({ from: malloryId.id, to: ["topic://tasks"], kind: "event", subject: "task", body: result !== undefined ? { op, id: created.id, result } : { op, id: created.id } });
+    e = { ...e, id: ulid(Date.now()).slice(0, 10) + "0".repeat(16) }; // fresh time prefix, minimal suffix
+    return signEnvelope(e, malloryId.privateKey);
+  };
+  await mt.publish(forge("claim"));
+  await mt.publish(forge("done", "ATTACKER-CONTROLLED OUTPUT"));
+  await wait(900);
+
+  // Ownership and result are unchanged — the forged claim/done were rejected server-side.
+  const t = await taskById(base, created.id);
+  assert.equal(t?.claimedBy, "agent://alice", "forged minimal-ULID claim did NOT hijack ownership");
+  assert.notEqual((t as { result?: string })?.result, "ATTACKER-CONTROLLED OUTPUT", "forged done was rejected");
+
+  await mt.stop();
+  await alice.stop();
   await server.stop();
 });

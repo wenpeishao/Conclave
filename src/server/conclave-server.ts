@@ -48,6 +48,7 @@ export class ConclaveServer {
   private adminToken?: string;
   private registry?: AgentRegistry;
   private hubIdentity?: Identity;
+  private claimedTasks = new Map<string, string>(); // taskId → first authorized claimer (server-authoritative ownership)
   // Streaming relay rendezvous: a channel waits for its other half, then bytes pipe
   // straight through (sender request body -> receiver response body). Nothing is stored.
   private waitingRecv = new Map<string, http.ServerResponse>();
@@ -180,17 +181,25 @@ export class ConclaveServer {
     if ((rec.zones ?? []).length > 0 && workTopics.length > 0 && !env.zone) {
       return { ok: false, reason: "zoned agent must stamp a member zone on work-topic traffic" };
     }
-    // Board action authorization — fail CLOSED (unknown task → reject, so a pre-board race can't slip through).
+    // Board action authorization. Ownership is decided SERVER-SIDE by first-claim-wins (relay
+    // receipt order, via this synchronous map) — NOT by the client-chosen env.id min-ULID — so a
+    // back-dated / low-entropy ULID cannot hijack a claim or done. The check-and-set runs
+    // atomically (authorizePolicy has no await), so two racing claims resolve to one winner.
     if (env.kind === "event" && env.subject === "task" && isTaskOp(env.body)) {
       const op = env.body;
       if (op.op === "claim") {
         const task = this.board.list().find((t) => t.id === op.id);
         if (!task) return { ok: false, reason: "claim of unknown task" };
         if (task.for && task.for !== rec.role) return { ok: false, reason: `role '${rec.role ?? "-"}' may not claim a task for '${task.for}'` };
+        const owner = this.claimedTasks.get(op.id) ?? task.claimedBy; // board fallback after a hub restart
+        if (owner && owner !== env.from) return { ok: false, reason: "task already claimed by another agent" };
+        this.claimedTasks.set(op.id, env.from);
       } else if (op.op === "done") {
         const task = this.board.list().find((t) => t.id === op.id);
         if (!task) return { ok: false, reason: "done of unknown task" };
-        if (!task.claimedBy || task.claimedBy !== env.from) return { ok: false, reason: "only the claiming agent may complete a task" };
+        const owner = this.claimedTasks.get(op.id) ?? task.claimedBy;
+        if (!owner) return { ok: false, reason: "done before any claim" };
+        if (owner !== env.from) return { ok: false, reason: "only the claiming agent may complete a task" };
       }
     }
     return { ok: true };

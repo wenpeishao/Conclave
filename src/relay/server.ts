@@ -248,18 +248,21 @@ export class RelayServer {
       sendFrame(ws, { t: "err", reason: "stale or malformed ts", id: env.id });
       return;
     }
-    // env.id is the board's convergence/ordering key (min-ULID wins), so it must be a real ULID
-    // whose embedded time is recent — otherwise a member could mint id "000…0" to hijack claims.
+    // env.id must be a real ULID whose embedded time is fresh AND agrees with env.ts (within a
+    // tight bound) — so it can't be back-dated independently of ts. (Board ownership no longer
+    // relies on this id; first-claim-wins is enforced server-side. This is defense-in-depth.)
     const idTime = decodeUlidTime(env.id);
-    if (!Number.isFinite(idTime) || Math.abs(now - idTime) > this.freshnessMs) {
-      sendFrame(ws, { t: "err", reason: "envelope id is not a fresh ULID", id: env.id });
+    if (!Number.isFinite(idTime) || Math.abs(now - idTime) > this.freshnessMs || Math.abs(idTime - ts) > 60000) {
+      sendFrame(ws, { t: "err", reason: "envelope id is not a fresh ULID consistent with ts", id: env.id });
       return;
     }
-    // Replay: an id we've already accepted cannot be re-published (verbatim replay defense).
+    // Replay: reserve the id synchronously BEFORE the await so two identical ids in flight can't
+    // both pass the check (a burned id is never legitimately reused, so no rollback is needed).
     if (this.recentA.has(env.id) || this.recentB.has(env.id)) {
       sendFrame(ws, { t: "err", reason: "duplicate envelope id", id: env.id });
       return;
     }
+    this.markRecent(env.id);
     if (this.verify) {
       const v = await this.verify(env);
       if (!v.ok) {
@@ -267,12 +270,17 @@ export class RelayServer {
         return;
       }
     }
-    this.markRecent(env.id);
     await this.publish(env);
   }
 
   private markRecent(id: string) {
     this.recentA.add(id);
+    // Bound memory: if a flood inflates the active set, rotate early (the displaced set still
+    // covers one freshness window, so replay protection holds).
+    if (this.recentA.size > 200000) {
+      this.recentB = this.recentA;
+      this.recentA = new Set();
+    }
   }
 
   private publish(env: Envelope): Promise<void> {
