@@ -26,6 +26,7 @@ export interface ClaudeCodeBrainOpts {
   persona?: string; // standing role, planted in the first turn
   model?: string; // --model (space-free)
   effort?: string; // --effort low|medium|high|xhigh|max
+  permissionMode?: string; // --permission-mode (e.g. bypassPermissions) — lets a teammate run/deploy
   cwd?: string;
   timeoutMs?: number;
   replyTo?: Set<string>;
@@ -88,6 +89,8 @@ export function claudeCodeBrain(opts: ClaudeCodeBrainOpts = {}): Brain {
       // Serialize calls: Claude Code cannot resume the same session concurrently.
       const run = chain.then(async () => {
         const args = ["-p", "--output-format", "json"];
+        // Re-applied every turn so a resumed deployer keeps its run permission.
+        if (opts.permissionMode) args.push("--permission-mode", opts.permissionMode);
         let stdin: string;
         if (!started) {
           args.push("--session-id", sessionId);

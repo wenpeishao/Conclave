@@ -17,7 +17,7 @@ import type { Envelope } from "../core/types.js";
 export const TASKS_TOPIC = "topic://tasks";
 
 export type TaskOp =
-  | { op: "add"; title: string }
+  | { op: "add"; title: string; for?: string } // `for` = required role/capability (role routing)
   | { op: "claim"; id: string }
   | { op: "done"; id: string; result?: string };
 
@@ -34,6 +34,7 @@ export interface Task {
   status: "open" | "claimed" | "done";
   claimedBy?: string;
   result?: string;
+  for?: string; // required role; only a worker with a matching role claims it (unset = anyone)
 }
 
 function isTaskOp(b: unknown): b is TaskOp {
@@ -51,7 +52,7 @@ const minBy = <T>(xs: T[], key: (x: T) => string): T =>
  * smallest ULID, so all hosts converge to the same board no matter what order events arrive.
  */
 export function reduceBoard(events: BoardEvent[]): Task[] {
-  const adds = new Map<string, { eid: string; from: string; title: string }[]>();
+  const adds = new Map<string, { eid: string; from: string; title: string; for?: string }[]>();
   const claims = new Map<string, { eid: string; from: string }[]>();
   const dones = new Map<string, { eid: string; from: string; result?: string }[]>();
   const push = <T>(m: Map<string, T[]>, id: string, v: T) => {
@@ -61,7 +62,7 @@ export function reduceBoard(events: BoardEvent[]): Task[] {
   };
 
   for (const { eid, from, op } of events) {
-    if (op.op === "add") push(adds, eid, { eid, from, title: op.title }); // task id = add envelope id
+    if (op.op === "add") push(adds, eid, { eid, from, title: op.title, for: op.for }); // task id = add envelope id
     else if (op.op === "claim") push(claims, op.id, { eid, from });
     else if (op.op === "done") push(dones, op.id, { eid, from, result: op.result });
   }
@@ -80,6 +81,7 @@ export function reduceBoard(events: BoardEvent[]): Task[] {
       claimedBy: claim?.from,
       result: done?.result,
       status: done ? "done" : claim ? "claimed" : "open",
+      for: add.for,
     });
   }
   return tasks.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
@@ -116,9 +118,9 @@ export class TaskBoard {
     return env;
   }
 
-  /** Post a new task; returns its id (= the publishing envelope's ULID). */
-  async add(title: string): Promise<string> {
-    const env = await this.publish({ op: "add", title });
+  /** Post a new task; returns its id. `for` restricts it to workers with that role. */
+  async add(title: string, opts: { for?: string } = {}): Promise<string> {
+    const env = await this.publish(opts.for ? { op: "add", title, for: opts.for } : { op: "add", title });
     return env.id;
   }
 
@@ -133,8 +135,9 @@ export class TaskBoard {
   list(): Task[] {
     return reduceBoard(this.events);
   }
-  open(): Task[] {
-    return this.list().filter((t) => t.status === "open");
+  /** Open tasks claimable by `role`: untagged tasks (anyone) plus tasks whose `for` matches. */
+  open(role?: string): Task[] {
+    return this.list().filter((t) => t.status === "open" && (!t.for || t.for === role));
   }
   /**
    * Claim the earliest open task and return it if WE won the claim, else null.
@@ -145,8 +148,8 @@ export class TaskBoard {
    * arrived) but a caller about to do irreversible work should re-check `claimedBy ===
    * its own id` after a short settle, or treat the claim as a hint, not a lock.
    */
-  async claimNext(settleMs = 0): Promise<Task | null> {
-    const next = this.open()[0];
+  async claimNext(settleMs = 0, role?: string): Promise<Task | null> {
+    const next = this.open(role)[0];
     if (!next) return null;
     await this.claim(next.id);
     // Wait for competing claims from other devices to propagate, then confirm we won the

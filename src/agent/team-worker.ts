@@ -22,6 +22,8 @@ export interface TeamWorkerEvent {
 export interface TeamWorkerOpts {
   pollMs?: number;
   settleMs?: number; // wait after claiming to confirm ownership across devices
+  role?: string; // only claim tasks tagged for this role (plus untagged ones)
+  handoffTo?: string; // after finishing, post a new task (for this role) carrying the result
   onEvent?: (ev: TeamWorkerEvent) => void;
 }
 
@@ -49,9 +51,10 @@ export class TeamWorker {
   private async loop(): Promise<void> {
     const pollMs = this.opts.pollMs ?? 2500;
     const settleMs = this.opts.settleMs ?? 1500;
+    const role = this.opts.role;
     while (!this.stopped) {
-      if (!this.busy && this.board.open().length > 0) {
-        const task = await this.board.claimNext(settleMs);
+      if (!this.busy && this.board.open(role).length > 0) {
+        const task = await this.board.claimNext(settleMs, role);
         if (task) {
           this.busy = true;
           this.opts.onEvent?.({ type: "claim", task });
@@ -63,6 +66,8 @@ export class TeamWorker {
           }
           await this.board.done(task.id, result);
           this.opts.onEvent?.({ type: "done", task, result });
+          // Pipeline handoff: pass the work product to the next role as a new task.
+          if (this.opts.handoffTo) await this.board.add(result, { for: this.opts.handoffTo });
           this.busy = false;
           continue; // immediately look for the next task
         }

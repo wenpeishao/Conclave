@@ -225,7 +225,7 @@ async function cmdWork(a: Args) {
   let brain;
   if (brainKind === "claude") {
     const { claudeCodeBrain } = await import("./agent/brains/claude-code.js");
-    brain = claudeCodeBrain({ persona: str(a, "persona") || undefined });
+    brain = claudeCodeBrain({ persona: str(a, "persona") || undefined, permissionMode: str(a, "permission") || undefined });
   } else {
     brain = echoBrain();
   }
@@ -233,6 +233,8 @@ async function cmdWork(a: Args) {
   const worker = new TeamWorker(host, board, brain, {
     pollMs: a["poll"] ? Number(a["poll"]) : 2500,
     settleMs: a["settle"] ? Number(a["settle"]) : 1500,
+    role: str(a, "role") || undefined,
+    handoffTo: str(a, "handoff") || undefined,
     onEvent: (ev) => {
       if (ev.type === "claim") console.log(`[${name}] claimed: ${ev.task?.title}`);
       else if (ev.type === "done") console.log(`[${name}] done:    ${ev.task?.title}  =>  ${String(ev.result).replace(/\s+/g, " ").slice(0, 90)}`);
@@ -281,7 +283,7 @@ async function cmdBoard(a: Args) {
     return;
   }
   if (sub === "add") {
-    const id = await board.add(str(a, "title") || str(a, "body") || "untitled task");
+    const id = await board.add(str(a, "title") || str(a, "body") || "untitled task", str(a, "for") ? { for: str(a, "for") } : {});
     console.log(`added ${id}`);
   } else if (sub === "claim") {
     // --task (not --id): --id is the agent-identity flag consumed by makeCard.
@@ -411,9 +413,11 @@ function help() {
   conclave board <add|list|claim|done|watch> --as <name> (transport flags as above)
         shared task board: add --title "..." | list | claim --task X | done --task X [--result R] | watch
 
-  conclave work  --as <name> [--brain claude] [--poll 2500] [--settle 1500] (transport flags)
-        self-organizing worker: claims open board tasks, does them with its brain,
-        marks them done. Run one per device -> a posted goal is split across the team.
+  conclave work  --as <name> [--brain claude] [--role R] [--handoff R2]
+                 [--permission bypassPermissions] [--persona "..."] [--poll] [--settle]
+        self-organizing worker: claims open board tasks (matching --role), does them with
+        its brain, marks them done. --handoff R2 posts the result as a new task for role R2
+        (a pipeline, e.g. coder --handoff deploy). --permission lets it run/deploy.
         (transport flags as above)
 
 Examples:
