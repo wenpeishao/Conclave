@@ -20,4 +20,7 @@ export interface Transport {
   publish(env: Envelope): Promise<void>;
   /** Register the single sink. Each delivered envelope carries the new cursor. */
   onEnvelope(handler: (env: Envelope, cursor: string | null) => void): void;
+  /** Optional: notified when the server REJECTS one of our published envelopes (by its id),
+   *  so optimistic local state (e.g. a board claim the server didn't accept) can be undone. */
+  onReject?(handler: (id: string, reason: string) => void): void;
 }

@@ -121,6 +121,7 @@ export class ConclaveServer {
       dataDir: path.join(this.dataDir, "hub"),
       heartbeatMs: 15000,
       identity: this.hubIdentity,
+      replayFromZero: true, // rebuild the authoritative board from the full log on every (re)start
     });
     this.board = new TaskBoard(this.host);
     await this.host.start();

@@ -8,7 +8,7 @@ import { NodeHost } from "../src/node/host.js";
 import { RelayWSTransport } from "../src/transports/relay-ws.js";
 import { TaskBoard } from "../src/agent/task-board.js";
 import { TeamWorker } from "../src/agent/team-worker.js";
-import { AutonomousAgent } from "../src/agent/runtime.js";
+import { AutonomousAgent, type Brain } from "../src/agent/runtime.js";
 import { echoBrain, ruleBrain } from "../src/agent/brains/rule.js";
 import { uploadBlob, downloadBlob, relaySend, relayReceive } from "../src/server/blob-client.js";
 import { generateIdentity, signData, type Identity } from "../src/core/identity.js";
@@ -145,6 +145,70 @@ test("use case: secure zoned role-handoff pipeline (coder → deploy)", async ()
   await deployer.stop();
   await hLead.stop();
   await server.stop();
+});
+
+test("use case: exactly-once under claim contention (no double-execution)", async () => {
+  // Regression: under contention with a short settle, server-rejected (losing) claims must NOT
+  // make a worker run the task — the client now honours the relay's rejection (un-applies it).
+  const { server, base, wsUrl } = await secureServer();
+  const N = 8;
+  let executions = 0;
+  const countBrain = (): Brain => ({
+    react: async (ctx) => {
+      executions++;
+      return [{ type: "send" as const, to: [ctx.message.from], body: `did:${String(ctx.message.body)}` }];
+    },
+  });
+
+  const lead = await enroll(base, "lead", "lead", ["s-scale"]);
+  const hLead = await mkHost(wsUrl, lead, "s-scale");
+  const bLead = new TaskBoard(hLead);
+  const workers: TeamWorker[] = [];
+  for (let i = 0; i < N; i++) {
+    const id = await enroll(base, `w${i}`, "w", ["s-scale"]);
+    const h = await mkHost(wsUrl, id, "s-scale");
+    workers.push(new TeamWorker(h, new TaskBoard(h), countBrain(), { pollMs: 25, settleMs: 120, role: "w" }));
+  }
+  await Promise.all(workers.map((w) => w.start()));
+  await hLead.start();
+  await wait(300);
+  for (let i = 0; i < N; i++) await bLead.add(`task-${i}`, { for: "w" });
+
+  await until(() => bLead.list().filter((t) => t.status === "done").length === N, 12000);
+  assert.equal(bLead.list().filter((t) => t.status === "done").length, N, "all tasks done");
+  assert.equal(executions, N, `each task executed exactly once (got ${executions} executions for ${N} tasks)`);
+
+  await Promise.all(workers.map((w) => w.stop()));
+  await hLead.stop();
+  await server.stop();
+});
+
+test("use case: the server board survives a relay restart (durable rebuild)", async () => {
+  // Regression: the hub must rebuild its authoritative board from the durable log on restart
+  // (it previously persisted a cursor past every event and came back with an empty board).
+  const dir = await tmpDir();
+  const s1 = new ConclaveServer({ wsPort: 0, httpPort: 0, dataDir: dir, token: CT, adminToken: AT });
+  await s1.start();
+  const wsPort = s1.wsPort();
+  const base1 = `http://127.0.0.1:${s1.httpPort()}`;
+  const poster = await enroll(base1, "poster", "lead", ["s-r"]);
+  const hPost = new NodeHost({ card: { id: poster.id, name: poster.name }, transport: new RelayWSTransport(`ws://127.0.0.1:${wsPort}`, CT, poster), dataDir: await tmpDir(), identity: poster, zone: "s-r", heartbeatMs: 60000 });
+  const bPost = new TaskBoard(hPost);
+  await hPost.start();
+  for (let i = 0; i < 3; i++) await bPost.add(`task${i}`, { for: "lead" });
+  await until(async () => ((await (await fetch(`${base1}/tasks`, { headers: { authorization: `Bearer ${AT}` } })).json()) as { tasks: unknown[] }).tasks.length === 3, 4000);
+  await hPost.stop();
+  await s1.stop();
+
+  // Restart on the SAME data dir + WS port.
+  const s2 = new ConclaveServer({ wsPort, httpPort: 0, dataDir: dir, token: CT, adminToken: AT });
+  await s2.start();
+  const base2 = `http://127.0.0.1:${s2.httpPort()}`;
+  await until(async () => ((await (await fetch(`${base2}/tasks`, { headers: { authorization: `Bearer ${AT}` } })).json()) as { tasks: unknown[] }).tasks.length === 3, 4000);
+  const rebuilt = ((await (await fetch(`${base2}/tasks`, { headers: { authorization: `Bearer ${AT}` } })).json()) as { tasks: { title: string }[] }).tasks;
+  assert.equal(rebuilt.length, 3, "the hub board rebuilt all 3 tasks from the durable log after restart");
+
+  await s2.stop();
 });
 
 test("use case: heterogeneous brains answer on one secure bus", async () => {

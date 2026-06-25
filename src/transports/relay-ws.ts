@@ -16,6 +16,7 @@ export class RelayWSTransport implements Transport {
   private url: string;
   private ws: WebSocket | null = null;
   private handler: ((e: Envelope, c: string | null) => void) | null = null;
+  private rejectHandler: ((id: string, reason: string) => void) | null = null;
   private cursor: string | null = null;
   private outQ: Envelope[] = [];
   private open = false;
@@ -35,6 +36,10 @@ export class RelayWSTransport implements Transport {
 
   onEnvelope(h: (e: Envelope, c: string | null) => void) {
     this.handler = h;
+  }
+
+  onReject(h: (id: string, reason: string) => void) {
+    this.rejectHandler = h;
   }
 
   async start(cursor: string | null): Promise<void> {
@@ -63,7 +68,7 @@ export class RelayWSTransport implements Transport {
         settle();
       });
       ws.on("message", (d) => {
-        let m: { t?: string; env?: Envelope; cursor?: string | null; reason?: string; nonce?: string };
+        let m: { t?: string; env?: Envelope; cursor?: string | null; reason?: string; nonce?: string; id?: string };
         try {
           m = JSON.parse(d.toString());
         } catch {
@@ -78,6 +83,7 @@ export class RelayWSTransport implements Transport {
           this.handler?.(m.env, this.cursor);
         } else if (m.t === "err") {
           console.error(`[conclave] relay rejected a message: ${m.reason ?? "unauthorized"}`);
+          if (m.id) this.rejectHandler?.(m.id, m.reason ?? "rejected");
         }
       });
       ws.on("close", () => {

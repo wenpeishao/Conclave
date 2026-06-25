@@ -101,6 +101,9 @@ export class TaskBoard {
         this.record(e.id, e.from, e.body);
       }
     });
+    // If the server REJECTS one of our ops (e.g. a claim it didn't accept — first-claim-wins
+    // means a loser is rejected), undo the optimistic local record so we don't act as owner.
+    host.onReject((id) => this.unrecord(id));
   }
 
   private record(eid: string, from: string, op: TaskOp) {
@@ -109,6 +112,18 @@ export class TaskBoard {
     this.events.push({ eid, from, op });
     const board = this.list();
     for (const cb of this.listeners) cb(board);
+  }
+
+  /** Undo an optimistically-recorded op the server rejected (e.g. a lost claim). */
+  private unrecord(eid: string) {
+    if (!this.seen.has(eid)) return;
+    const before = this.events.length;
+    this.events = this.events.filter((e) => e.eid !== eid);
+    this.seen.delete(eid);
+    if (this.events.length !== before) {
+      const board = this.list();
+      for (const cb of this.listeners) cb(board);
+    }
   }
 
   private async publish(op: TaskOp): Promise<Envelope> {

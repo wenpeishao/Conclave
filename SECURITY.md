@@ -47,8 +47,10 @@ ownership, or take the server down cheaply.
 
 ## Known limitations (hardening roadmap)
 
-- Zone membership is set at enrollment (no dynamic join yet); a resource agent serving many
-  ephemeral sessions uses P2P or is enrolled per-zone.
+- Zone membership is set at enrollment (no dynamic join yet). A host belongs to multiple zones
+  for RECEIVE, but by default stamps its first zone on outgoing work traffic; a multi-zone agent
+  that needs to *send* into several zones passes `send({ zone })` per message (or runs one host
+  per zone). Auto-stamping the right zone in `TeamWorker` board ops is a roadmap item.
 - Task claims have no lease/TTL yet: a claim is released on completion or when the claimer is
   revoked, but an agent that claims and then silently dies (without being revoked) pins that one
   task until an admin revokes it. (Claim leases are on the roadmap.)

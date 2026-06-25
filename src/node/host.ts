@@ -23,6 +23,8 @@ export interface HostOpts {
   heartbeatMs?: number;
   identity?: Identity; // if set, every outgoing envelope is ed25519-signed
   zone?: string; // if set, outgoing envelopes are stamped with this zone (scoped delivery)
+  replayFromZero?: boolean; // ignore the persisted cursor/seen → full replay each start (the
+  // server hub uses this so its in-memory board fully rebuilds from the durable log on restart)
 }
 
 type MsgHandler = (e: Envelope) => void | Promise<void>;
@@ -42,6 +44,7 @@ export class NodeHost {
   private heartbeatMs: number;
   private identity?: Identity;
   private zone?: string;
+  private replayFromZero: boolean;
 
   private seq = 0;
   private cursor: string | null = null;
@@ -49,6 +52,7 @@ export class NodeHost {
   private seenOrder: string[] = [];
   private roster = new Map<string, RosterEntry>();
   private handlers: MsgHandler[] = [];
+  private rejectHandlers: ((id: string) => void)[] = [];
   private hbTimer: ReturnType<typeof setInterval> | null = null;
   private saveChain: Promise<void> = Promise.resolve();
   private saveCounter = 0;
@@ -61,11 +65,17 @@ export class NodeHost {
     this.heartbeatMs = o.heartbeatMs ?? 10000;
     this.identity = o.identity;
     this.zone = o.zone;
+    this.replayFromZero = o.replayFromZero ?? false;
   }
 
   /** Register a sink for messages addressed to this agent. */
   onMessage(h: MsgHandler) {
     this.handlers.push(h);
+  }
+
+  /** Register a sink notified when the server rejected one of OUR published envelopes (by id). */
+  onReject(h: (id: string) => void) {
+    this.rejectHandlers.push(h);
   }
 
   /** Known agents and whether they are currently online (heartbeat within 3 beats). */
@@ -95,6 +105,9 @@ export class NodeHost {
     this.t.onEnvelope((e, c) => {
       void this.onEnvelope(e, c);
     });
+    this.t.onReject?.((id) => {
+      for (const cb of this.rejectHandlers) cb(id);
+    });
     await this.t.start(this.cursor);
     await this.announce();
     this.hbTimer = setInterval(() => {
@@ -118,10 +131,13 @@ export class NodeHost {
       corr?: string;
       content_type?: string;
       artifacts?: Artifact[];
+      zone?: string; // override the host's default zone (must be one the agent belongs to);
+      // lets a MULTI-ZONE agent answer into the right zone instead of always its first zone
     } = {},
   ): Promise<Envelope> {
     let env = makeEnvelope({ from: this.card.id, to, seq: ++this.seq, ...opts });
-    if (this.zone) env.zone = this.zone;
+    const zone = opts.zone ?? this.zone;
+    if (zone) env.zone = zone;
     if (this.identity) env = signEnvelope(env, this.identity.privateKey);
     this.markSeen(env.id); // never deliver our own message back to ourselves
     await this.append("outbound.ndjson", env);
@@ -210,9 +226,14 @@ export class NodeHost {
         roster?: { card: AgentCard }[];
       };
       this.seq = s.seq ?? 0;
-      this.cursor = s.cursor ?? null;
-      this.seenOrder = s.seen ?? [];
-      this.seen = new Set(this.seenOrder);
+      // replayFromZero: keep cursor=null + empty seen so start() does a FULL replay and the
+      // in-memory board rebuilds from the whole durable log (otherwise a restored cursor points
+      // past every event and the board would stay empty).
+      if (!this.replayFromZero) {
+        this.cursor = s.cursor ?? null;
+        this.seenOrder = s.seen ?? [];
+        this.seen = new Set(this.seenOrder);
+      }
       for (const r of s.roster ?? []) this.roster.set(r.card.id, { card: r.card, lastSeen: 0 });
     } catch {
       /* fresh start */
