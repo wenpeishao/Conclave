@@ -212,6 +212,39 @@ async function cmdAgent(a: Args) {
   });
 }
 
+async function cmdWork(a: Args) {
+  const name = str(a, "as");
+  if (!name) throw new Error("work requires --as <name>");
+  const card = makeCard(a, name);
+  const host = new NodeHost({ card, transport: buildTransport(transportFromArgs(a, name)), dataDir: dataHome(a) });
+  const { TaskBoard } = await import("./agent/task-board.js");
+  const { TeamWorker } = await import("./agent/team-worker.js");
+  const board = new TaskBoard(host);
+
+  const brainKind = str(a, "brain", "claude");
+  let brain;
+  if (brainKind === "claude") {
+    const { claudeCodeBrain } = await import("./agent/brains/claude-code.js");
+    brain = claudeCodeBrain({ persona: str(a, "persona") || undefined });
+  } else {
+    brain = echoBrain();
+  }
+
+  const worker = new TeamWorker(host, board, brain, {
+    pollMs: a["poll"] ? Number(a["poll"]) : 2500,
+    settleMs: a["settle"] ? Number(a["settle"]) : 1500,
+    onEvent: (ev) => {
+      if (ev.type === "claim") console.log(`[${name}] claimed: ${ev.task?.title}`);
+      else if (ev.type === "done") console.log(`[${name}] done:    ${ev.task?.title}  =>  ${String(ev.result).replace(/\s+/g, " ").slice(0, 90)}`);
+    },
+  });
+  await worker.start();
+  console.log(`[conclave] team worker ${card.id} (${brainKind}) working the shared board. Ctrl-C to stop.`);
+  process.on("SIGINT", () => {
+    void worker.stop().then(() => process.exit(0));
+  });
+}
+
 async function cmdBoard(a: Args) {
   const sub = str(a, "_sub") || "list"; // set by main() from the positional arg
   const name = str(a, "as", "board-cli");
@@ -377,6 +410,10 @@ function help() {
 
   conclave board <add|list|claim|done|watch> --as <name> (transport flags as above)
         shared task board: add --title "..." | list | claim --task X | done --task X [--result R] | watch
+
+  conclave work  --as <name> [--brain claude] [--poll 2500] [--settle 1500] (transport flags)
+        self-organizing worker: claims open board tasks, does them with its brain,
+        marks them done. Run one per device -> a posted goal is split across the team.
         (transport flags as above)
 
 Examples:
@@ -403,6 +440,8 @@ async function main() {
       return cmdTeam(args);
     case "board":
       return cmdBoard(args);
+    case "work":
+      return cmdWork(args);
     default:
       help();
   }

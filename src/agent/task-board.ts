@@ -145,10 +145,14 @@ export class TaskBoard {
    * arrived) but a caller about to do irreversible work should re-check `claimedBy ===
    * its own id` after a short settle, or treat the claim as a hint, not a lock.
    */
-  async claimNext(): Promise<Task | null> {
+  async claimNext(settleMs = 0): Promise<Task | null> {
     const next = this.open()[0];
     if (!next) return null;
     await this.claim(next.id);
+    // Wait for competing claims from other devices to propagate, then confirm we won the
+    // min-ULID tie-break. With settleMs > cross-device latency this reliably prevents two
+    // machines from both working the same task.
+    if (settleMs > 0) await new Promise((r) => setTimeout(r, settleMs));
     const after = this.list().find((t) => t.id === next.id);
     return after?.claimedBy === this.host.card.id ? after : null;
   }
