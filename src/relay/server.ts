@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { IncomingMessage } from "node:http";
 import type { Envelope } from "../core/types.js";
 import { randomToken } from "../core/identity.js";
+import { decodeUlidTime } from "../core/ulid.js";
 
 /**
  * The relay: a tiny broadcast hub with a durable append-only log.
@@ -45,11 +46,16 @@ export class RelayServer {
   private authenticate?: (hello: { id?: string; cursor?: string | null; nonce?: string; sig?: string }) => ConnBinding | null;
   private bindings = new Map<WebSocket, ConnBinding>();
   private challenges = new Map<WebSocket, string>(); // per-connection one-time nonce
-  private recentIds = new Set<string>(); // anti-replay: ids already accepted
-  private recentOrder: string[] = [];
+  // Anti-replay: two rotating sets swapped every freshnessMs, so an id is remembered for at
+  // least one full freshness window (covering the replay window) with bounded memory.
+  private recentA = new Set<string>();
+  private recentB = new Set<string>();
+  private rotateTimer: ReturnType<typeof setInterval> | null = null;
   private freshnessMs = 600000; // ±10 min clock window for accepting an envelope
   private rates = new Map<WebSocket, { n: number; t: number }>(); // per-connection pub rate
   private maxPubPerSec = 300;
+  private handshakeTimers = new Map<WebSocket, ReturnType<typeof setTimeout>>();
+  private maxConnections = 2000;
 
   constructor(o: RelayOpts) {
     this.wantPort = o.port;
@@ -89,6 +95,11 @@ export class RelayServer {
     this.count = await countLines(this.logFile);
     this.wss = new WebSocketServer({ port: this.wantPort, maxPayload: 512 * 1024 });
     this.wss.on("connection", (ws, req) => this.onConn(ws, req));
+    this.rotateTimer = setInterval(() => {
+      this.recentB = this.recentA;
+      this.recentA = new Set();
+    }, this.freshnessMs);
+    if (this.rotateTimer.unref) this.rotateTimer.unref();
     await new Promise<void>((resolve, reject) => {
       this.wss!.once("listening", () => resolve());
       this.wss!.once("error", reject);
@@ -96,6 +107,9 @@ export class RelayServer {
   }
 
   async stop(): Promise<void> {
+    if (this.rotateTimer) clearInterval(this.rotateTimer);
+    for (const t of this.handshakeTimers.values()) clearTimeout(t);
+    this.handshakeTimers.clear();
     for (const c of this.clients) c.close();
     this.clients.clear();
     await new Promise<void>((resolve) => (this.wss ? this.wss.close(() => resolve()) : resolve()));
@@ -109,7 +123,18 @@ export class RelayServer {
         return;
       }
     }
+    // Bound total concurrent connections (so the per-connection rate limit can't be multiplied
+    // by opening unlimited sockets, and half-open sockets can't exhaust memory).
+    if (this.clients.size >= this.maxConnections) {
+      ws.close(1013, "server at capacity");
+      return;
+    }
     this.clients.add(ws);
+    // Handshake deadline: a socket that never completes a valid hello is reaped (slowloris guard).
+    this.handshakeTimers.set(
+      ws,
+      setTimeout(() => ws.close(1008, "handshake timeout"), 10000),
+    );
     // Secure mode: issue a one-time challenge nonce. The client must echo it in a signed
     // hello, so a captured hello cannot be replayed to bind a different socket to an id.
     if (this.authenticate) {
@@ -132,12 +157,22 @@ export class RelayServer {
       this.bindings.delete(ws);
       this.challenges.delete(ws);
       this.rates.delete(ws);
+      const t = this.handshakeTimers.get(ws);
+      if (t) {
+        clearTimeout(t);
+        this.handshakeTimers.delete(ws);
+      }
     };
     ws.on("close", drop);
     ws.on("error", drop);
   }
 
   private async onHello(ws: WebSocket, msg: { id?: string; cursor?: string | null; nonce?: string; sig?: string }) {
+    const ht = this.handshakeTimers.get(ws); // handshake reached — cancel the reaper
+    if (ht) {
+      clearTimeout(ht);
+      this.handshakeTimers.delete(ws);
+    }
     if (this.authenticate) {
       const expected = this.challenges.get(ws);
       this.challenges.delete(ws); // one-time
@@ -165,8 +200,10 @@ export class RelayServer {
     if (b.wildcard) return true; // the hub / control plane sees everything
     if (env.to === "*") return true; // global discovery broadcast
     if (!Array.isArray(env.to)) return false;
-    // Discovery plane is global regardless of any zone stamp (roster + global queries).
-    if (env.to.some((t) => t === "topic://presence" || t === "topic://discovery")) return true;
+    // Discovery plane is global — but ONLY for a PURE discovery envelope, so a work payload
+    // can't ride along by co-listing topic://presence with a secret topic.
+    const isDiscovery = (t: string) => t === "topic://presence" || t === "topic://discovery";
+    if (env.kind === "presence" || env.to.every(isDiscovery)) return true;
     if (env.to.includes(b.id)) return true; // directed to this agent (crosses zones intentionally)
     if (env.to.some((t) => t.startsWith("topic://"))) {
       // Work topic: zone-scoped → members only; un-zoned → only from global (zone-less) senders.
@@ -203,15 +240,23 @@ export class RelayServer {
       sendFrame(ws, { t: "err", reason: "rate limit exceeded", id: env.id });
       return;
     }
-    // Freshness: reject envelopes whose timestamp is far outside the clock window. This bounds
-    // how long a captured signed envelope can be replayed for.
+    // Freshness: ts must be present, parseable, and within the clock window (a missing/garbage
+    // ts must NOT skip the check). Bounds how long a captured envelope can be replayed.
+    const now = Date.now();
     const ts = Date.parse(env.ts);
-    if (Number.isFinite(ts) && Math.abs(Date.now() - ts) > this.freshnessMs) {
-      sendFrame(ws, { t: "err", reason: "stale envelope (outside freshness window)", id: env.id });
+    if (!Number.isFinite(ts) || Math.abs(now - ts) > this.freshnessMs) {
+      sendFrame(ws, { t: "err", reason: "stale or malformed ts", id: env.id });
+      return;
+    }
+    // env.id is the board's convergence/ordering key (min-ULID wins), so it must be a real ULID
+    // whose embedded time is recent — otherwise a member could mint id "000…0" to hijack claims.
+    const idTime = decodeUlidTime(env.id);
+    if (!Number.isFinite(idTime) || Math.abs(now - idTime) > this.freshnessMs) {
+      sendFrame(ws, { t: "err", reason: "envelope id is not a fresh ULID", id: env.id });
       return;
     }
     // Replay: an id we've already accepted cannot be re-published (verbatim replay defense).
-    if (this.recentIds.has(env.id)) {
+    if (this.recentA.has(env.id) || this.recentB.has(env.id)) {
       sendFrame(ws, { t: "err", reason: "duplicate envelope id", id: env.id });
       return;
     }
@@ -227,12 +272,7 @@ export class RelayServer {
   }
 
   private markRecent(id: string) {
-    this.recentIds.add(id);
-    this.recentOrder.push(id);
-    if (this.recentOrder.length > 50000) {
-      const old = this.recentOrder.shift();
-      if (old) this.recentIds.delete(old);
-    }
+    this.recentA.add(id);
   }
 
   private publish(env: Envelope): Promise<void> {

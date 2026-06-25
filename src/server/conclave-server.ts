@@ -165,6 +165,10 @@ export class ConclaveServer {
     if (env.kind === "presence") {
       const card = env.body as AgentCard | undefined;
       if (!card || card.id !== env.from) return { ok: false, reason: "presence id must equal from" };
+      // Can't advertise zone memberships you don't actually hold.
+      if (card.zones && !card.zones.every((z) => (rec.zones ?? []).includes(z))) {
+        return { ok: false, reason: "presence advertises a non-member zone" };
+      }
       return { ok: true }; // presence is the global discovery plane — no zone required
     }
     // DENY-BY-DEFAULT for the work plane: a zoned agent must stamp one of its zones on any
@@ -236,9 +240,10 @@ export class ConclaveServer {
     const adminPresented = (req.headers["x-conclave-admin"] as string | undefined) ?? authBearer;
     const isAdmin = !!this.adminToken && adminPresented === this.adminToken;
 
-    const selfAuthed = p === "/enroll" || p.startsWith("/admin/");
+    // /admin/* carries its own admin token; everything else (incl. /enroll, for defense-in-depth)
+    // requires the connect token. The admin token is strictly more privileged, so it also passes.
+    const selfAuthed = p.startsWith("/admin/");
     if (this.token && !selfAuthed) {
-      // The admin token is strictly more privileged, so it also satisfies the connect gate.
       if (presented !== this.token && !isAdmin) return send(401, { error: "unauthorized" });
     }
     // In secure mode, endpoints that publish bus traffic AS THE HUB are admin-only — a mere
@@ -253,6 +258,12 @@ export class ConclaveServer {
     // observability surface. Agents receive their own zone's traffic over the scoped bus.
     if (this.registry && req.method === "GET" && p === "/messages" && !isAdmin) {
       return send(403, { error: "secure mode: message history is admin-only (agents read scoped traffic over the bus)" });
+    }
+    // Enumerating every blob's hash is a cross-zone harvest vector → admin-only in secure mode.
+    // (Fetching a specific blob by sha stays open: the hash is an unguessable capability and
+    // history is already admin-gated, so it can't be harvested cross-zone.)
+    if (this.registry && req.method === "GET" && p === "/blobs" && !isAdmin) {
+      return send(403, { error: "secure mode: blob enumeration is admin-only" });
     }
 
     // --- identity / enrollment (secure mode) ---
@@ -367,9 +378,16 @@ export class ConclaveServer {
       const sha = createHash("sha256").update(buf).digest("hex");
       const file = path.join(this.blobsDir, sha);
       if (!existsSync(file)) {
+        // Reserve the quota synchronously BEFORE the await so concurrent POSTs can't all pass
+        // the check and overshoot (TOCTOU); roll back if the write fails.
         if (this.blobBytes + buf.length > this.maxBlobBytes) return send(507, { error: "blob store quota exceeded" });
-        await fs.writeFile(file, buf);
         this.blobBytes += buf.length;
+        try {
+          await fs.writeFile(file, buf);
+        } catch (e) {
+          this.blobBytes -= buf.length;
+          throw e;
+        }
       }
       return send(200, { sha256: sha, size: buf.length, uri: `conclave://blobs/${sha}` });
     }

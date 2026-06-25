@@ -27,6 +27,20 @@ function incrementRand(rand: number[]): number[] {
   return out; // overflow (astronomically unlikely within 1ms) — wraps, still unique enough
 }
 
+/** Decode a ULID's 48-bit millisecond timestamp, or NaN if malformed. */
+export function decodeUlidTime(id: string): number {
+  if (typeof id !== "string" || id.length !== TIME_LEN + RAND_LEN) return NaN;
+  let t = 0;
+  for (let i = 0; i < TIME_LEN; i++) {
+    const v = ENCODING.indexOf(id[i].toUpperCase());
+    if (v < 0) return NaN;
+    t = t * 32 + v;
+  }
+  // Validate the random part is in-alphabet too.
+  for (let i = TIME_LEN; i < TIME_LEN + RAND_LEN; i++) if (ENCODING.indexOf(id[i].toUpperCase()) < 0) return NaN;
+  return t;
+}
+
 export function ulid(time: number = Date.now()): string {
   let rand: number[];
   if (time === lastTime) {

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ulid } from "../src/core/ulid.js";
+import { ulid, decodeUlidTime } from "../src/core/ulid.js";
 import { makeEnvelope, validateEnvelope, deliverableTo } from "../src/core/envelope.js";
 import { MemoryHub } from "../src/transports/memory.js";
 import { NodeHost } from "../src/node/host.js";
@@ -13,6 +13,15 @@ test("ulid: 26 chars, monotonic, lexicographically time-sortable", () => {
   assert.equal(a.length, 26);
   assert.ok(a < b, "same-ms ulids increase");
   assert.ok(b < c, "later-ms ulid sorts after");
+});
+
+test("ulid: decodeUlidTime recovers the timestamp and rejects forgeries", () => {
+  // The relay binds env.id's embedded time to the freshness window; a forged tiny id decodes
+  // to a far-past time and is rejected, defeating the min-ULID board-claim hijack.
+  assert.equal(decodeUlidTime(ulid(1700000000000)), 1700000000000);
+  assert.equal(decodeUlidTime("0000000000000000000000000"), 0, "forged '000…' decodes to epoch 0");
+  assert.ok(Number.isNaN(decodeUlidTime("not-a-ulid")), "malformed id → NaN");
+  assert.ok(Number.isNaN(decodeUlidTime("00000000000000000000000I!")), "out-of-alphabet → NaN");
 });
 
 test("envelope: make + validate + addressing", () => {
