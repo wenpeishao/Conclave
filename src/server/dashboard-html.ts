@@ -44,9 +44,10 @@ export const DASHBOARD_HTML = `<!doctype html>
   #tip .row b { color:var(--fg); font-weight:500; }
   #tip .caps { margin-top:5px; display:flex; flex-wrap:wrap; gap:4px; }
   #tip .caps i { font-style:normal; background:#1e2733; border-radius:4px; padding:1px 6px; color:#aab6c8; }
-  #err { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); text-align:center; color:var(--muted); }
-  #err b { color:var(--bad); }
+  #msg { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); text-align:center; color:var(--muted); }
+  #msg b { color:var(--bad); }
   .hint { color:var(--muted); font-size:12px; }
+  .vh { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
 </style>
 </head>
 <body>
@@ -58,12 +59,13 @@ export const DASHBOARD_HTML = `<!doctype html>
     <span class="stat"><b id="s-zones">0</b> zones</span>
     <span class="hint" id="s-updated"></span>
     <span class="spacer"></span>
-    <input id="token" type="password" placeholder="admin token" autocomplete="off" />
+    <input id="token" type="password" placeholder="admin token" autocomplete="off" aria-label="admin token" />
     <button id="save">Connect</button>
     <button id="reheat" title="re-run layout">Relayout</button>
   </header>
   <div id="wrap">
-    <canvas id="cv"></canvas>
+    <canvas id="cv" role="img" aria-label="Node topology graph"></canvas>
+    <ul id="a11y" class="vh" aria-live="polite" aria-label="Nodes by zone"></ul>
     <div id="legend">
       <span><i class="dot" style="background:var(--on)"></i>online</span>
       <span><i class="dot" style="background:var(--busy)"></i>busy</span>
@@ -72,31 +74,36 @@ export const DASHBOARD_HTML = `<!doctype html>
       <span><i class="dot" style="background:var(--zone)"></i>zone</span>
       <span class="hint">drag · scroll to zoom · hover for detail</span>
     </div>
-    <div id="tip"></div>
-    <div id="err" style="display:none"></div>
+    <div id="tip" role="tooltip"></div>
+    <div id="msg" style="display:none"></div>
   </div>
 </div>
 <script>
 (function(){
   "use strict";
   var cv = document.getElementById("cv"), ctx = cv.getContext("2d");
-  var tip = document.getElementById("tip"), errEl = document.getElementById("err");
+  var tip = document.getElementById("tip"), msgEl = document.getElementById("msg"), a11y = document.getElementById("a11y");
   var tokenIn = document.getElementById("token");
   var nodes = [], links = [], byId = {}, view = { x:0, y:0, k:1 }, dragging = null, panning = null, hot = null;
-  var alpha = 1; // simulation "temperature"
+  var alpha = 1, rafQueued = false, selfId = null, prevKey = "", poll = null, authFailed = false;
 
-  // --- token persistence (localStorage; sent as Bearer to the gated /api/nodes) ---
-  try { tokenIn.value = localStorage.getItem("conclave.adminToken") || ""; } catch(e){}
+  try { tokenIn.value = sessionStorage.getItem("conclave.adminToken") || ""; } catch(e){} // session-scoped, cleared on tab close
   document.getElementById("save").onclick = function(){
-    try { localStorage.setItem("conclave.adminToken", tokenIn.value); } catch(e){}
-    fetchNodes();
+    try { sessionStorage.setItem("conclave.adminToken", tokenIn.value); } catch(e){}
+    authFailed = false; fetchNodes(); startPoll();
   };
-  document.getElementById("reheat").onclick = function(){ alpha = 1; requestAnimationFrame(loop); };
+  document.getElementById("reheat").onclick = function(){ alpha = 1; kick(); };
 
-  function size(){ var r = cv.parentElement.getBoundingClientRect(); cv.width = r.width*devicePixelRatio; cv.height = r.height*devicePixelRatio; }
-  window.addEventListener("resize", function(){ size(); });
+  // --- single animation scheduler: ALL repaint requests funnel through kick() so concurrent
+  //     events (mousemove + pan + refresh) can never spin up overlapping rAF loops ---
+  function kick(){ if (rafQueued) return; rafQueued = true; requestAnimationFrame(frame); }
+  function frame(){ rafQueued = false; step(); draw(); if (alpha > 0.025) kick(); }
+
+  function size(){ var r = cv.parentElement.getBoundingClientRect(); cv.width = r.width*devicePixelRatio; cv.height = r.height*devicePixelRatio; kick(); }
+  window.addEventListener("resize", size);
   size();
 
+  function getCss(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
   function statusColor(n){
     if (n.type === "zone") return getCss("--zone");
     if (n.revoked) return getCss("--bad");
@@ -104,40 +111,56 @@ export const DASHBOARD_HTML = `<!doctype html>
     if (n.status === "busy") return getCss("--busy");
     return getCss("--on");
   }
-  function getCss(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
 
   // --- merge a fresh snapshot, PRESERVING positions of nodes we already have (no jump on refresh) ---
   function ingest(data){
+    selfId = data.self ? "node:"+data.self : null;
     var W = cv.width/devicePixelRatio, H = cv.height/devicePixelRatio;
     var next = {}, nextNodes = [];
     function ensure(id, make){
       var ex = byId[id];
-      if (ex){ Object.assign(ex, make); next[id]=ex; nextNodes.push(ex); return ex; }
-      var n = make; n.x = W/2 + (Math.random()-0.5)*240; n.y = H/2 + (Math.random()-0.5)*240; n.vx=0; n.vy=0;
-      next[id]=n; nextNodes.push(n); return n;
+      if (ex){ for (var k in make) ex[k]=make[k]; next[id]=ex; nextNodes.push(ex); return ex; }
+      make.x = W/2 + (Math.random()-0.5)*240; make.y = H/2 + (Math.random()-0.5)*240; make.vx=0; make.vy=0;
+      next[id]=make; nextNodes.push(make); return make;
     }
     var zoneSet = {};
     (data.nodes||[]).forEach(function(a){ (a.zones&&a.zones.length?a.zones:["(no zone)"]).forEach(function(z){ zoneSet[z]=true; }); });
     Object.keys(zoneSet).forEach(function(z){ ensure("zone:"+z, { id:"zone:"+z, type:"zone", label:z, r:16 }); });
     (data.nodes||[]).forEach(function(a){
       ensure("node:"+a.id, { id:"node:"+a.id, type:"agent", label:a.name||a.id, r:8,
-        online:!!a.online, status:a.status, role:a.role, canRun:!!a.canRun, revoked:!!a.revoked,
+        online:!!a.online, status:a.status, role:a.role, canRun:!!a.canRun, revoked:!!a.revoked, isSelf:!!a.self,
         enrolled:a.enrolled!==false, zones:(a.zones&&a.zones.length?a.zones:["(no zone)"]), caps:a.capabilities||[], agentId:a.id });
     });
     byId = next; nodes = nextNodes;
     links = [];
     nodes.forEach(function(n){ if (n.type==="agent") n.zones.forEach(function(z){ var zn=byId["zone:"+z]; if (zn) links.push({a:n, b:zn}); }); });
-    // header stats
+    if (hot && !byId[hot.id]) hot=null; if (dragging && !byId[dragging.id]) dragging=null; // drop stale refs
+
     var agents = nodes.filter(function(n){ return n.type==="agent"; });
     set("s-nodes", agents.length); set("s-online", agents.filter(function(n){return n.online;}).length);
     set("s-zones", (data.zones||[]).length);
-    var d = new Date(data.generatedAt||Date.now());
-    set("s-updated", "updated " + d.toLocaleTimeString());
-    alpha = Math.max(alpha, 0.6); requestAnimationFrame(loop);
+    set("s-updated", "updated " + new Date(data.generatedAt||Date.now()).toLocaleTimeString());
+    updateA11y(agents);
+
+    // Only re-heat the layout when the node SET actually changed — a plain status refresh keeps
+    // positions, so the graph settles and stops burning CPU instead of jittering every 3s.
+    var key = nextNodes.map(function(n){return n.id;}).sort().join(",");
+    if (key !== prevKey){ prevKey = key; alpha = Math.max(alpha, 0.6); }
+    kick();
   }
   function set(id, v){ document.getElementById(id).textContent = String(v); }
 
-  // --- force simulation (repulsion + zone springs + gravity), Verlet-ish integration ---
+  // accessible text alternative for the canvas (screen reader / no-mouse)
+  function updateA11y(agents){
+    a11y.textContent = "";
+    agents.slice().sort(function(a,b){ return a.label<b.label?-1:1; }).forEach(function(n){
+      var li=document.createElement("li");
+      li.textContent = n.label+" — zone "+n.zones.join("/")+" — "+(n.revoked?"revoked":(!n.online?"offline":(n.status||"available")))+(n.role?(" — "+n.role):"")+(n.caps.length?(" — "+n.caps.join(", ")):"");
+      a11y.appendChild(li);
+    });
+  }
+
+  // --- force simulation (repulsion + zone springs + gravity) ---
   function step(){
     var W = cv.width/devicePixelRatio, H = cv.height/devicePixelRatio, cx=W/2, cy=H/2;
     for (var i=0;i<nodes.length;i++){
@@ -148,12 +171,12 @@ export const DASHBOARD_HTML = `<!doctype html>
         var fx=dx/d*rep, fy=dy/d*rep;
         a.vx+=fx; a.vy+=fy; b.vx-=fx; b.vy-=fy;
       }
-      a.vx += (cx-a.x)*0.0016; a.vy += (cy-a.y)*0.0016; // gravity to center
+      a.vx += (cx-a.x)*0.0016; a.vy += (cy-a.y)*0.0016;
     }
     for (var l=0;l<links.length;l++){
-      var L=links[l], dx=L.b.x-L.a.x, dy=L.b.y-L.a.y, d=Math.sqrt(dx*dx+dy*dy)||1, rest=92, f=(d-rest)*0.02;
-      var fx=dx/d*f, fy=dy/d*f;
-      L.a.vx+=fx; L.a.vy+=fy; L.b.vx-=fx*0.3; L.b.vy-=fy*0.3; // zones move less
+      var L=links[l], ddx=L.b.x-L.a.x, ddy=L.b.y-L.a.y, dd=Math.sqrt(ddx*ddx+ddy*ddy)||1, f=(dd-92)*0.02;
+      var lfx=ddx/dd*f, lfy=ddy/dd*f;
+      L.a.vx+=lfx; L.a.vy+=lfy; L.b.vx-=lfx*0.3; L.b.vy-=lfy*0.3;
     }
     for (var k=0;k<nodes.length;k++){
       var n=nodes[k]; if (n===dragging) { n.vx=0; n.vy=0; continue; }
@@ -167,6 +190,7 @@ export const DASHBOARD_HTML = `<!doctype html>
   function draw(){
     ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
     ctx.clearRect(0,0,cv.width,cv.height);
+    if (!nodes.length){ msgEl.style.display = authFailed ? "block" : "none"; return; }
     ctx.save(); ctx.translate(view.x,view.y); ctx.scale(view.k,view.k);
     ctx.lineWidth=1; ctx.strokeStyle="rgba(120,140,170,0.22)";
     for (var l=0;l<links.length;l++){ var L=links[l]; ctx.beginPath(); ctx.moveTo(L.a.x,L.a.y); ctx.lineTo(L.b.x,L.b.y); ctx.stroke(); }
@@ -176,6 +200,7 @@ export const DASHBOARD_HTML = `<!doctype html>
       ctx.fillStyle = n.type==="zone" ? "rgba(59,130,246,0.18)" : col; ctx.fill();
       ctx.lineWidth = (n===hot?2.5:1.4); ctx.strokeStyle = (n.type==="zone"?getCss("--zone"):col); ctx.stroke();
       if (n.type==="agent" && n.status==="busy" && n.online){ ctx.beginPath(); ctx.arc(n.x,n.y,n.r+3,0,6.2832); ctx.strokeStyle="rgba(251,189,35,0.5)"; ctx.stroke(); }
+      if (n.isSelf){ ctx.beginPath(); ctx.arc(n.x,n.y,n.r+4,0,6.2832); ctx.strokeStyle="#cfe0ff"; ctx.lineWidth=1; ctx.stroke(); } // the server hub
       ctx.fillStyle = n.type==="zone" ? "#cfe0ff" : "#aeb9ca";
       ctx.font = (n.type==="zone"?"600 12px ":"11px ")+"ui-sans-serif,system-ui,sans-serif";
       ctx.textAlign="center"; ctx.textBaseline="top";
@@ -184,32 +209,33 @@ export const DASHBOARD_HTML = `<!doctype html>
     ctx.restore();
   }
 
-  function loop(){ step(); draw(); if (alpha>0.025) requestAnimationFrame(loop); }
-
   // --- picking + interaction (screen → world) ---
   function world(ev){ var r=cv.getBoundingClientRect(); return { x:(ev.clientX-r.left-view.x)/view.k, y:(ev.clientY-r.top-view.y)/view.k, sx:ev.clientX-r.left, sy:ev.clientY-r.top }; }
   function pick(wx,wy){ for (var i=nodes.length-1;i>=0;i--){ var n=nodes[i], dx=n.x-wx, dy=n.y-wy; if (dx*dx+dy*dy <= (n.r+4)*(n.r+4)) return n; } return null; }
 
   cv.addEventListener("mousedown", function(ev){
     var w=world(ev), n=pick(w.x,w.y);
-    if (n){ dragging=n; cv.classList.add("drag"); } else { panning={x:ev.clientX,y:ev.clientY,vx:view.x,vy:view.y}; cv.classList.add("drag"); }
+    if (n){ dragging=n; } else { panning={x:ev.clientX,y:ev.clientY,vx:view.x,vy:view.y}; }
+    cv.classList.add("drag");
   });
   window.addEventListener("mousemove", function(ev){
     var w=world(ev);
-    if (dragging){ dragging.x=w.x; dragging.y=w.y; dragging.vx=0; dragging.vy=0; alpha=Math.max(alpha,0.5); requestAnimationFrame(loop); }
-    else if (panning){ view.x=panning.vx+(ev.clientX-panning.x); view.y=panning.vy+(ev.clientY-panning.y); requestAnimationFrame(loop); }
-    else { var n=pick(w.x,w.y); hot=n; n ? showTip(n,w.sx,w.sy) : hideTip(); requestAnimationFrame(loop); }
+    if (dragging){ dragging.x=w.x; dragging.y=w.y; dragging.vx=0; dragging.vy=0; alpha=Math.max(alpha,0.5); kick(); }
+    else if (panning){ view.x=panning.vx+(ev.clientX-panning.x); view.y=panning.vy+(ev.clientY-panning.y); kick(); }
+    else { var n=pick(w.x,w.y); hot=n; n ? showTip(n,w.sx,w.sy) : hideTip(); kick(); }
   });
   window.addEventListener("mouseup", function(){ dragging=null; panning=null; cv.classList.remove("drag"); });
   cv.addEventListener("wheel", function(ev){ ev.preventDefault(); var r=cv.getBoundingClientRect(), mx=ev.clientX-r.left, my=ev.clientY-r.top;
     var f=ev.deltaY<0?1.12:0.89, nk=Math.max(0.25,Math.min(4,view.k*f));
-    view.x = mx-(mx-view.x)*(nk/view.k); view.y = my-(my-view.y)*(nk/view.k); view.k=nk; requestAnimationFrame(loop);
+    view.x = mx-(mx-view.x)*(nk/view.k); view.y = my-(my-view.y)*(nk/view.k); view.k=nk;
+    if (hot){ var hb=cv.getBoundingClientRect(); showTip(hot, hot.x*view.k+view.x, hot.y*view.k+view.y); }
+    kick();
   }, { passive:false });
 
   // --- tooltip (DOM textContent only — node-supplied strings are never parsed as HTML) ---
   function showTip(n,sx,sy){
     tip.textContent="";
-    var nm=document.createElement("div"); nm.className="nm"; nm.textContent=(n.type==="zone"?"zone · ":"")+n.label; tip.appendChild(nm);
+    var nm=document.createElement("div"); nm.className="nm"; nm.textContent=(n.type==="zone"?"zone · ":"")+n.label+(n.isSelf?"  (server)":""); tip.appendChild(nm);
     function row(k,v){ var d=document.createElement("div"); d.className="row"; var a=document.createElement("span"); a.textContent=k; var b=document.createElement("b"); b.textContent=v; d.appendChild(a); d.appendChild(b); tip.appendChild(d); }
     if (n.type==="zone"){ var mem=nodes.filter(function(x){return x.type==="agent"&&x.zones.indexOf(n.label)>=0;}); row("members",String(mem.length)); row("online",String(mem.filter(function(x){return x.online;}).length)); }
     else {
@@ -219,22 +245,36 @@ export const DASHBOARD_HTML = `<!doctype html>
       if (n.enrolled===false) row("enrolled","no (roster only)");
       if (n.caps && n.caps.length){ var c=document.createElement("div"); c.className="caps"; n.caps.forEach(function(cap){ var i=document.createElement("i"); i.textContent=cap; c.appendChild(i); }); tip.appendChild(c); }
     }
-    var W=cv.parentElement.clientWidth; tip.style.left=Math.min(sx+14,W-290)+"px"; tip.style.top=(sy+14)+"px"; tip.style.opacity="1";
+    var box=cv.parentElement, W=box.clientWidth, H=box.clientHeight;
+    tip.style.opacity="1"; var th=tip.offsetHeight, tw=tip.offsetWidth;
+    tip.style.left=Math.max(4,Math.min(sx+14, W-tw-6))+"px";
+    tip.style.top=Math.max(4,Math.min(sy+14, H-th-6))+"px"; // clamp so it never clips off-canvas
   }
   function hideTip(){ tip.style.opacity="0"; }
 
-  // --- data fetch (admin-gated) ---
+  // --- data fetch (admin-gated). An explicit load/Connect always fetches; only the periodic
+  //     poll pauses while the tab is hidden, and it stops entirely on an auth failure. ---
   function fetchNodes(){
     var tok=tokenIn.value||"";
     fetch("/api/nodes", { headers: tok?{authorization:"Bearer "+tok}:{} })
       .then(function(r){ if (r.status===401||r.status===403){ throw new Error("auth"); } if (!r.ok) throw new Error("http "+r.status); return r.json(); })
-      .then(function(d){ errEl.style.display="none"; cv.style.display="block"; ingest(d); })
-      .catch(function(e){ showErr(e.message==="auth" ? "Enter the <b>admin token</b> above and click Connect." : ("Could not load nodes: "+e.message)); });
+      .then(function(d){ authFailed=false; msgEl.style.display="none"; cv.style.display="block"; ingest(d); })
+      .catch(function(e){
+        if (e.message==="auth"){ authFailed=true; stopPoll(); showMsg(true, "Enter the admin token above and click Connect."); }
+        else showMsg(false, "Could not load nodes: " + e.message);
+      });
   }
-  function showErr(html){ errEl.style.display="block"; errEl.innerHTML=html; } // fixed strings only — never node data
+  function showMsg(isAuth, text){ // DOM only — never innerHTML, even for the (fixed) message
+    msgEl.textContent=""; msgEl.style.display="block";
+    if (isAuth){ var s=document.createElement("span"); s.appendChild(document.createTextNode("Enter the ")); var b=document.createElement("b"); b.textContent="admin token"; s.appendChild(b); s.appendChild(document.createTextNode(" above and click Connect.")); msgEl.appendChild(s); }
+    else msgEl.textContent=text;
+  }
+  function startPoll(){ if (poll) return; poll=setInterval(function(){ if (!document.hidden) fetchNodes(); }, 3000); } // poll skips while hidden
+  function stopPoll(){ if (poll){ clearInterval(poll); poll=null; } }
+  document.addEventListener("visibilitychange", function(){ if (!document.hidden && !authFailed) fetchNodes(); }); // refresh promptly on return
 
   fetchNodes();
-  setInterval(fetchNodes, 3000); // live refresh
+  startPoll();
 })();
 </script>
 </body>

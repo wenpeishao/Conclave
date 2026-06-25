@@ -292,14 +292,26 @@ test("dashboard: /api/nodes is admin-gated and maps nodes to zones; /dashboard s
   await hA.start();
   await wait(400); // alpha's presence reaches the hub roster
 
-  // Admin-gated: no token → 401.
+  // Admin-gated: no token → 401, and a mere CONNECT-token holder is rejected too (privilege boundary).
   assert.equal((await fetch(`${base}/api/nodes`)).status, 401);
+  assert.equal((await fetch(`${base}/api/nodes`, { headers: { authorization: `Bearer ${CT}` } })).status, 401, "connect-token holder cannot read the node list");
+  // GET / does not leak the roster to a connect-token holder (only an online count); admin gets it.
+  const statusConnect = (await (await fetch(`${base}/`, { headers: { authorization: `Bearer ${CT}` } })).json()) as { roster?: unknown; online?: number };
+  assert.equal(statusConnect.roster, undefined, "GET / withholds the roster from a non-admin");
+  const statusAdmin = (await (await fetch(`${base}/`, { headers: { authorization: `Bearer ${AT}` } })).json()) as { roster?: unknown[] };
+  assert.ok(Array.isArray(statusAdmin.roster), "GET / gives the roster to an admin");
 
   // With the admin token → merged registry + presence.
-  const d = (await (await fetch(`${base}/api/nodes`, { headers: { authorization: `Bearer ${AT}` } })).json()) as {
+  const raw = await (await fetch(`${base}/api/nodes`, { headers: { authorization: `Bearer ${AT}` } })).text();
+  assert.doesNotMatch(raw, /publicKey|privateKey/, "snapshot leaks no key material");
+  const d = JSON.parse(raw) as {
+    self: string;
     zones: { name: string; nodeCount: number; onlineCount: number }[];
-    nodes: { id: string; zones: string[]; online: boolean; role?: string; enrolled: boolean }[];
+    nodes: { id: string; zones: string[]; online: boolean; role?: string; enrolled: boolean; self?: boolean }[];
   };
+  const hub = d.nodes.find((n) => n.id === d.self);
+  assert.equal(hub?.online, true, "the hub shows online (it is the live server), not a dead node");
+  assert.equal(hub?.self, true);
   const alpha = d.nodes.find((n) => n.id === "agent://alpha");
   const bravo = d.nodes.find((n) => n.id === "agent://bravo");
   assert.deepEqual(alpha?.zones, ["s-pipe"]);

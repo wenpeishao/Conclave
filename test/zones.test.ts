@@ -80,8 +80,10 @@ test("zones: zone-broadcast reaches same-zone members only; P2P crosses zones", 
   assert.ok(carolGot.includes("direct to carol"), "P2P delivered across zones");
   assert.ok(!bobGot.includes("direct to carol"), "P2P not delivered to a non-recipient");
 
-  // The hub is a wildcard receiver → its roster sees every agent regardless of zone.
-  const roster = (await (await fetch(`${base}/`, { headers: { authorization: `Bearer ${CT}` } })).json()) as { roster: { id: string }[] };
+  // The hub is a wildcard receiver → its roster sees every agent regardless of zone. The roster
+  // is presence reconnaissance, so GET / only returns it to an admin (a connect-token holder gets
+  // a count) — matching the /api/nodes boundary.
+  const roster = (await (await fetch(`${base}/`, { headers: { authorization: `Bearer ${AT}` } })).json()) as { roster: { id: string }[] };
   const ids = roster.roster.map((r) => r.id);
   for (const want of ["agent://alice", "agent://bob", "agent://carol"]) assert.ok(ids.includes(want), `hub roster has ${want}`);
 

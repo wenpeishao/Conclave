@@ -88,9 +88,12 @@ export class NodeHost {
   /** Known agents and whether they are currently online (heartbeat within 3 beats). */
   getRoster(): (AgentCard & { online: boolean })[] {
     const now = Date.now();
+    // Liveness is judged against OUR heartbeat interval, but a peer may beat slower than we do —
+    // a generous floor keeps a slower-beating-but-alive agent from flickering offline between beats.
+    const window = Math.max(this.heartbeatMs * 3, 90_000);
     return [...this.roster.values()].map((r) => ({
       ...r.card,
-      online: now - r.lastSeen < this.heartbeatMs * 3,
+      online: now - r.lastSeen < window,
     }));
   }
 

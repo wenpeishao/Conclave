@@ -1,7 +1,7 @@
 import * as http from "node:http";
 import * as path from "node:path";
 import { promises as fs, createReadStream, existsSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import * as readline from "node:readline";
 import { RelayServer, type ConnBinding } from "../relay/server.js";
 import { NodeHost } from "../node/host.js";
@@ -11,6 +11,14 @@ import type { Envelope, AgentCard } from "../core/types.js";
 import { AgentRegistry } from "./registry.js";
 import { generateIdentity, verifyData, signData, type Identity } from "../core/identity.js";
 import { DASHBOARD_HTML } from "./dashboard-html.js";
+
+/** Constant-time token comparison (avoid leaking the secret via response-time differences). */
+function tokenEq(presented: string | undefined, secret: string | undefined): boolean {
+  if (!presented || !secret) return false;
+  const a = Buffer.from(presented);
+  const b = Buffer.from(secret);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 /**
  * ConclaveServer — a deployable coordination backend. One process, three jobs:
@@ -252,15 +260,17 @@ export class ConclaveServer {
     secure: boolean;
     self: string;
     zones: { name: string; nodeCount: number; onlineCount: number }[];
-    nodes: { id: string; name: string; role?: string; canRun: boolean; revoked: boolean; zones: string[]; online: boolean; status?: string; capabilities: string[]; enrolled: boolean }[];
+    nodes: { id: string; name: string; role?: string; canRun: boolean; revoked: boolean; zones: string[]; online: boolean; status?: string; capabilities: string[]; enrolled: boolean; self?: boolean }[];
   } {
+    const hubId = this.hubIdentity?.id;
     const roster = new Map(this.host.getRoster().map((c) => [c.id, c]));
-    const nodes: { id: string; name: string; role?: string; canRun: boolean; revoked: boolean; zones: string[]; online: boolean; status?: string; capabilities: string[]; enrolled: boolean }[] = [];
+    const nodes: { id: string; name: string; role?: string; canRun: boolean; revoked: boolean; zones: string[]; online: boolean; status?: string; capabilities: string[]; enrolled: boolean; self?: boolean }[] = [];
     const seen = new Set<string>();
     for (const r of this.registry ? this.registry.list() : []) {
       seen.add(r.id);
       const pres = roster.get(r.id);
-      nodes.push({ id: r.id, name: r.name, role: r.role, canRun: r.canRun, revoked: r.revoked, zones: r.zones ?? [], online: pres?.online ?? false, status: pres?.status, capabilities: pres?.capabilities ?? [], enrolled: true });
+      const isHub = r.id === hubId; // the hub never beats into its own roster — it IS the live server
+      nodes.push({ id: r.id, name: r.name, role: r.role, canRun: r.canRun, revoked: r.revoked, zones: r.zones ?? [], online: isHub ? true : (pres?.online ?? false), status: pres?.status, capabilities: pres?.capabilities ?? [], enrolled: true, self: isHub || undefined });
     }
     for (const c of roster.values()) {
       if (seen.has(c.id)) continue; // not enrolled (legacy mode) — still show it on the map
@@ -313,13 +323,13 @@ export class ConclaveServer {
     })();
     const presented = authBearer ?? (req.headers["x-conclave-token"] as string | undefined) ?? url.searchParams.get("token") ?? undefined;
     const adminPresented = (req.headers["x-conclave-admin"] as string | undefined) ?? authBearer;
-    const isAdmin = !!this.adminToken && adminPresented === this.adminToken;
+    const isAdmin = tokenEq(adminPresented, this.adminToken);
 
     // /admin/* carries its own admin token; everything else (incl. /enroll, for defense-in-depth)
     // requires the connect token. The admin token is strictly more privileged, so it also passes.
     const selfAuthed = p.startsWith("/admin/");
     if (this.token && !selfAuthed) {
-      if (presented !== this.token && !isAdmin) return send(401, { error: "unauthorized" });
+      if (!tokenEq(presented, this.token) && !isAdmin) return send(401, { error: "unauthorized" });
     }
     // In secure mode, endpoints that publish bus traffic AS THE HUB are admin-only — a mere
     // connect-token holder must not be able to launder content into hub-signed envelopes.
@@ -366,7 +376,7 @@ export class ConclaveServer {
       const auth = req.headers["authorization"];
       const bearer = typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : undefined;
       const admin = (req.headers["x-conclave-admin"] as string | undefined) ?? bearer;
-      if (admin !== this.adminToken) return send(401, { error: "admin token required" });
+      if (!tokenEq(admin, this.adminToken)) return send(401, { error: "admin token required" });
 
       if (req.method === "GET" && p === "/admin/agents") {
         return send(200, { agents: this.registry.list() });
@@ -423,7 +433,9 @@ export class ConclaveServer {
         service: "conclave-server",
         secure: !!this.registry,
         ws: `ws://0.0.0.0:${this.wsPort()}`,
-        roster: this.host.getRoster(),
+        // The cross-zone roster is presence reconnaissance — admin-only in secure mode, matching
+        // the /api/nodes, /messages and /blobs boundary. A mere connect-token holder sees a count.
+        ...(this.registry && !isAdmin ? { online: this.host.getRoster().filter((c) => c.online).length } : { roster: this.host.getRoster() }),
         tasks: this.board.list().length,
       });
     }
