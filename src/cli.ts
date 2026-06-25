@@ -419,8 +419,9 @@ async function cmdBoard(a: Args) {
     }
   };
 
-  // Give the board a moment to sync from the bus before acting/printing.
-  await new Promise((r) => setTimeout(r, str(a, "transport") === "git" ? 1500 : 600));
+  // Give the board time to sync from the bus (replay) before acting/printing. Over the public
+  // internet / a large log this can take a couple seconds; --sync overrides it.
+  await new Promise((r) => setTimeout(r, a["sync"] ? Number(str(a, "sync")) : str(a, "transport") === "git" ? 1500 : 2000));
 
   if (sub === "watch") {
     console.log("[conclave] watching task board. Ctrl-C to exit.");

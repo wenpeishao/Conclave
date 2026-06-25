@@ -4,7 +4,7 @@ import { ConclaveServer } from "../src/server/conclave-server.js";
 import { NodeHost } from "../src/node/host.js";
 import { RelayWSTransport } from "../src/transports/relay-ws.js";
 import { generateIdentity, signData, type Identity } from "../src/core/identity.js";
-import { tmpDir, wait } from "./helpers.js";
+import { tmpDir, wait, until } from "./helpers.js";
 
 const CT = "connect-token";
 const AT = "admin-token";
@@ -121,6 +121,39 @@ test("zones: discovery plane is global — presence (capabilities + availability
 
   await gpu.stop();
   await lab.stop();
+  await server.stop();
+});
+
+test("zones: a late-joining same-zone member receives prior zone history via replay", async () => {
+  const dir = await tmpDir();
+  const server = new ConclaveServer({ wsPort: 0, httpPort: 0, dataDir: dir, token: CT, adminToken: AT });
+  await server.start();
+  const base = `http://127.0.0.1:${server.httpPort()}`;
+  const wsUrl = `ws://127.0.0.1:${server.wsPort()}`;
+
+  const aliceId = await enroll(base, "alice", ["s-A"]);
+  const bobId = await enroll(base, "bob", ["s-A"]);
+
+  // Alice posts a zone-stamped message, then disconnects.
+  const alice = new NodeHost({ card: { id: aliceId.id, name: "alice" }, transport: new RelayWSTransport(wsUrl, CT, aliceId), dataDir: await tmpDir(), identity: aliceId, zone: "s-A", heartbeatMs: 60000 });
+  await alice.start();
+  await wait(300);
+  await alice.send(["topic://room"], { body: "earlier zone-A message" });
+  await wait(400);
+  await alice.stop();
+
+  // Bob joins AFTER, subscribed to the same topic — he must get the history via replay.
+  const bobGot: unknown[] = [];
+  const bob = new NodeHost({ card: { id: bobId.id, name: "bob" }, transport: new RelayWSTransport(wsUrl, CT, bobId), dataDir: await tmpDir(), identity: bobId, zone: "s-A", heartbeatMs: 60000 });
+  bob.subscribe("topic://room");
+  bob.onMessage((e) => {
+    bobGot.push(e.body);
+  });
+  await bob.start();
+  await until(() => bobGot.includes("earlier zone-A message"), 4000);
+  assert.ok(bobGot.includes("earlier zone-A message"), "late joiner replays the zone history");
+
+  await bob.stop();
   await server.stop();
 });
 
