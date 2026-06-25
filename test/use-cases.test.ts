@@ -284,6 +284,43 @@ test("use case: a board agent rebuilds its FULL board after a process restart (n
   await server.stop();
 });
 
+test("dashboard: /api/nodes is admin-gated and maps nodes to zones; /dashboard serves HTML", async () => {
+  const { server, base, wsUrl } = await secureServer();
+  const a = await enroll(base, "alpha", "coder", ["s-pipe"]);
+  await enroll(base, "bravo", "deploy", ["s-gpu"]); // enrolled but never connects → offline
+  const hA = await mkHost(wsUrl, a, "s-pipe");
+  await hA.start();
+  await wait(400); // alpha's presence reaches the hub roster
+
+  // Admin-gated: no token → 401.
+  assert.equal((await fetch(`${base}/api/nodes`)).status, 401);
+
+  // With the admin token → merged registry + presence.
+  const d = (await (await fetch(`${base}/api/nodes`, { headers: { authorization: `Bearer ${AT}` } })).json()) as {
+    zones: { name: string; nodeCount: number; onlineCount: number }[];
+    nodes: { id: string; zones: string[]; online: boolean; role?: string; enrolled: boolean }[];
+  };
+  const alpha = d.nodes.find((n) => n.id === "agent://alpha");
+  const bravo = d.nodes.find((n) => n.id === "agent://bravo");
+  assert.deepEqual(alpha?.zones, ["s-pipe"]);
+  assert.equal(alpha?.online, true, "connected agent shows online");
+  assert.equal(alpha?.role, "coder");
+  assert.deepEqual(bravo?.zones, ["s-gpu"]);
+  assert.equal(bravo?.online, false, "never-connected agent shows offline");
+  assert.ok(d.zones.find((z) => z.name === "s-pipe" && z.onlineCount === 1), "zone summary counts online members");
+
+  // The dashboard shell is served as HTML (and carries no node data itself).
+  const html = await fetch(`${base}/dashboard`);
+  assert.equal(html.status, 200);
+  assert.match(html.headers.get("content-type") ?? "", /text\/html/);
+  const body = await html.text();
+  assert.match(body, /Conclave/);
+  assert.doesNotMatch(body, /agent:\/\/alpha/, "the shell embeds no node data (fetched live + gated instead)");
+
+  await hA.stop();
+  await server.stop();
+});
+
 test("use case: an enrolled agent survives a server restart (durable registry)", async () => {
   const dir = await tmpDir();
   const s1 = new ConclaveServer({ wsPort: 0, httpPort: 0, dataDir: dir, token: CT, adminToken: AT });

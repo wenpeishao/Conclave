@@ -10,6 +10,7 @@ import { TaskBoard, isTaskOp, type Task } from "../agent/task-board.js";
 import type { Envelope, AgentCard } from "../core/types.js";
 import { AgentRegistry } from "./registry.js";
 import { generateIdentity, verifyData, signData, type Identity } from "../core/identity.js";
+import { DASHBOARD_HTML } from "./dashboard-html.js";
 
 /**
  * ConclaveServer — a deployable coordination backend. One process, three jobs:
@@ -240,6 +241,49 @@ export class ConclaveServer {
     }
   }
 
+  /**
+   * Live node topology for the dashboard: every enrolled agent (the registry is authoritative for
+   * zone membership / role / revoked) merged with its live presence from the roster (online,
+   * available/busy, advertised capabilities). Roster entries with no registry record (legacy mode)
+   * are included too, flagged `enrolled:false`.
+   */
+  private nodesSnapshot(): {
+    generatedAt: number;
+    secure: boolean;
+    self: string;
+    zones: { name: string; nodeCount: number; onlineCount: number }[];
+    nodes: { id: string; name: string; role?: string; canRun: boolean; revoked: boolean; zones: string[]; online: boolean; status?: string; capabilities: string[]; enrolled: boolean }[];
+  } {
+    const roster = new Map(this.host.getRoster().map((c) => [c.id, c]));
+    const nodes: { id: string; name: string; role?: string; canRun: boolean; revoked: boolean; zones: string[]; online: boolean; status?: string; capabilities: string[]; enrolled: boolean }[] = [];
+    const seen = new Set<string>();
+    for (const r of this.registry ? this.registry.list() : []) {
+      seen.add(r.id);
+      const pres = roster.get(r.id);
+      nodes.push({ id: r.id, name: r.name, role: r.role, canRun: r.canRun, revoked: r.revoked, zones: r.zones ?? [], online: pres?.online ?? false, status: pres?.status, capabilities: pres?.capabilities ?? [], enrolled: true });
+    }
+    for (const c of roster.values()) {
+      if (seen.has(c.id)) continue; // not enrolled (legacy mode) — still show it on the map
+      nodes.push({ id: c.id, name: c.name, role: undefined, canRun: false, revoked: false, zones: c.zones ?? [], online: c.online, status: c.status, capabilities: c.capabilities ?? [], enrolled: false });
+    }
+    const zoneMap = new Map<string, { name: string; nodeCount: number; onlineCount: number }>();
+    for (const n of nodes) {
+      for (const z of n.zones.length ? n.zones : ["(no zone)"]) {
+        const e = zoneMap.get(z) ?? { name: z, nodeCount: 0, onlineCount: 0 };
+        e.nodeCount++;
+        if (n.online) e.onlineCount++;
+        zoneMap.set(z, e);
+      }
+    }
+    return {
+      generatedAt: Date.now(),
+      secure: !!this.registry,
+      self: this.hubIdentity?.id ?? "agent://hub",
+      zones: [...zoneMap.values()].sort((a, b) => a.name.localeCompare(b.name)),
+      nodes: nodes.sort((a, b) => a.id.localeCompare(b.id)),
+    };
+  }
+
   // ---- HTTP API ----------------------------------------------------------
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -251,6 +295,14 @@ export class ConclaveServer {
 
     // Unauthenticated liveness probe (no sensitive data) — for container HEALTHCHECK / LBs.
     if (req.method === "GET" && p === "/healthz") return send(200, { ok: true });
+
+    // Node-topology dashboard (admin cockpit). The HTML shell carries no data — it polls the
+    // admin-gated /api/nodes below — so it is safe to serve unauthenticated.
+    if (req.method === "GET" && (p === "/dashboard" || p === "/dashboard/")) {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(DASHBOARD_HTML);
+      return;
+    }
 
     // Shared-token auth (Authorization: Bearer <t>, or x-conclave-token, or ?token=).
     // Admin + enrollment endpoints carry their OWN credentials (admin token / one-time
@@ -355,6 +407,14 @@ export class ConclaveServer {
         return send(ok ? 200 : 404, ok ? { revoked: true } : { error: "agent not found" });
       }
       return send(405, { error: "method not allowed" });
+    }
+
+    // Live node topology for the dashboard: enrolled agents (registry = authoritative zones/role)
+    // merged with live presence (roster = online/busy/capabilities). Admin-gated in secure mode —
+    // it exposes the full registry, including offline and revoked agents.
+    if (req.method === "GET" && p === "/api/nodes") {
+      if (this.registry && !isAdmin) return send(401, { error: "admin token required" });
+      return send(200, this.nodesSnapshot());
     }
 
     // status
