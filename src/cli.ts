@@ -242,6 +242,9 @@ async function cmdServe(a: Args) {
   const dataDir = str(a, "data", path.join(dataHome(a), "server"));
   const token = str(a, "token") || process.env.CONCLAVE_TOKEN || undefined;
   const adminToken = str(a, "admin-token") || process.env.CONCLAVE_ADMIN_TOKEN || undefined;
+  if (adminToken && !token) {
+    throw new Error("secure mode (--admin-token) also requires --token (or CONCLAVE_TOKEN): the connect token gates who may open a WS connection / reach the HTTP API at all.");
+  }
   const { ConclaveServer } = await import("./server/conclave-server.js");
   const server = new ConclaveServer({ wsPort, httpPort, dataDir, token, adminToken });
   await server.start();

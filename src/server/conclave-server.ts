@@ -79,6 +79,12 @@ export class ConclaveServer {
     await fs.mkdir(this.blobsDir, { recursive: true });
 
     // SECURE MODE: an admin token turns on per-agent identity + signature enforcement.
+    if (this.adminToken && !this.token) {
+      throw new Error(
+        "secure mode (--admin-token) also requires a connect token (--token): without it the WS bus " +
+          "accepts anonymous connections (full read of all traffic) and bus-mutating HTTP endpoints are ungated.",
+      );
+    }
     if (this.adminToken) {
       this.registry = new AgentRegistry(this.dataDir);
       await this.registry.load();
@@ -148,12 +154,26 @@ export class ConclaveServer {
     // Shared-token auth (Authorization: Bearer <t>, or x-conclave-token, or ?token=).
     // Admin + enrollment endpoints carry their OWN credentials (admin token / one-time
     // enrollment token), so they bypass the coarse connect-token gate.
+    const authBearer = (() => {
+      const auth = req.headers["authorization"];
+      return typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : undefined;
+    })();
+    const presented = authBearer ?? (req.headers["x-conclave-token"] as string | undefined) ?? url.searchParams.get("token") ?? undefined;
+    const adminPresented = (req.headers["x-conclave-admin"] as string | undefined) ?? authBearer;
+    const isAdmin = !!this.adminToken && adminPresented === this.adminToken;
+
     const selfAuthed = p === "/enroll" || p.startsWith("/admin/");
     if (this.token && !selfAuthed) {
-      const auth = req.headers["authorization"];
-      const bearer = typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : undefined;
-      const got = bearer ?? (req.headers["x-conclave-token"] as string | undefined) ?? url.searchParams.get("token") ?? undefined;
-      if (got !== this.token) return send(401, { error: "unauthorized" });
+      // The admin token is strictly more privileged, so it also satisfies the connect gate.
+      if (presented !== this.token && !isAdmin) return send(401, { error: "unauthorized" });
+    }
+    // In secure mode, endpoints that publish bus traffic AS THE HUB are admin-only — a mere
+    // connect-token holder must not be able to launder content into hub-signed envelopes.
+    const busMutating =
+      (req.method === "POST" && (p === "/tasks" || p === "/messages")) ||
+      (req.method === "POST" && /^\/tasks\/[^/]+\/(claim|done)$/.test(p));
+    if (this.registry && busMutating && !isAdmin) {
+      return send(403, { error: "secure mode: bus-mutating HTTP endpoints require the admin token (agents publish over the signed bus instead)" });
     }
 
     // --- identity / enrollment (secure mode) ---

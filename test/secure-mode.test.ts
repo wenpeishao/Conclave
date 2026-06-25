@@ -86,6 +86,31 @@ test("secure mode: only enrolled+signed agents can act; forged/unsigned/revoked 
   await server.stop();
 });
 
+test("secure hardening: --admin-token requires --token; HTTP cannot launder hub-signed content", async () => {
+  // Regression for the red-team CRITICAL: --admin-token alone left the WS bus open to anonymous
+  // connections and let unauthenticated HTTP POSTs become hub-signed, authorized bus envelopes.
+  const adminOnly = new ConclaveServer({ wsPort: 0, httpPort: 0, dataDir: await tmpDir(), adminToken: AT });
+  await assert.rejects(() => adminOnly.start(), /requires a connect token/);
+
+  const server = new ConclaveServer({ wsPort: 0, httpPort: 0, dataDir: await tmpDir(), token: CT, adminToken: AT });
+  await server.start();
+  const base = `http://127.0.0.1:${server.httpPort()}`;
+
+  // Unauthenticated message injection → refused (previously laundered into a hub-signed broadcast).
+  const anon = await fetch(`${base}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ to: "*", body: "forged directive" }) });
+  assert.ok(anon.status === 401 || anon.status === 403, "anonymous bus injection refused");
+
+  // A mere connect-token holder cannot mutate the board as the privileged hub.
+  const ctOnly = await fetch(`${base}/tasks`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${CT}` }, body: JSON.stringify({ title: "forged" }) });
+  assert.equal(ctOnly.status, 403, "connect-token holder cannot act as hub over HTTP");
+
+  // The admin can (legitimate dashboard/webhook path).
+  const admin = await fetch(`${base}/tasks`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${AT}` }, body: JSON.stringify({ title: "legit admin task" }) });
+  assert.equal(admin.status, 200);
+
+  await server.stop();
+});
+
 test("secure mode off (no admin token) keeps legacy shared-token behavior", async () => {
   const dir = await tmpDir();
   const server = new ConclaveServer({ wsPort: 0, httpPort: 0, dataDir: dir, token: CT });
