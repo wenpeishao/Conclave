@@ -285,6 +285,18 @@ function httpBase(a: Args): string {
   return `${scheme}://${host}:${httpPort}`;
 }
 
+// When invite/enroll get "server not in secure mode", the HTTP request reached a server that
+// isn't running secure mode — almost always a config issue. Make it debuggable instead of cryptic.
+function secureHint(err: string | undefined, base: string): string {
+  if (!/secure mode/i.test(err ?? "")) return "";
+  return (
+    `\n  → the HTTP server at ${base} is not in SECURE mode. Check:` +
+    `\n     1. the server was started with BOTH --token AND --admin-token (secure mode needs both),` +
+    `\n     2. --http-port (default 8088) / --http-url matches the server's --http port,` +
+    `\n     3. nothing else (e.g. a stray 'conclave serve' with no auth) is listening on that port.`
+  );
+}
+
 // Device: pre-generate a keypair and print its public key, so an admin can PIN it at invite
 // time (defeats enrollment-token interception — only this exact key can enroll the name).
 async function cmdKeygen(a: Args) {
@@ -314,7 +326,7 @@ async function cmdInvite(a: Args) {
     body: JSON.stringify({ name, role: str(a, "role") || undefined, canRun: a["can-run"] === true, zones, pin: str(a, "pin") || undefined }),
   });
   const j = (await res.json()) as { enrollToken?: string; error?: string; role?: string; canRun?: boolean; zones?: string[] };
-  if (!res.ok) throw new Error(`invite failed: ${j.error ?? res.status}`);
+  if (!res.ok) throw new Error(`invite failed: ${j.error ?? res.status}${secureHint(j.error, base)}`);
   const wsUrl = str(a, "url", "ws://127.0.0.1:8787");
   const token = str(a, "token") || process.env.CONCLAVE_TOKEN || "<connect-token>";
   console.log(`[conclave] invited agent://${name} (role=${j.role ?? "-"}, canRun=${j.canRun ?? false})`);
@@ -339,7 +351,7 @@ async function cmdEnroll(a: Args) {
     body: JSON.stringify({ token: enroll, publicKey: ident.publicKey, proof }),
   });
   const j = (await res.json()) as { id?: string; role?: string; canRun?: boolean; zones?: string[]; error?: string };
-  if (!res.ok) throw new Error(`enroll failed: ${j.error ?? res.status}`);
+  if (!res.ok) throw new Error(`enroll failed: ${j.error ?? res.status}${secureHint(j.error, base)}`);
   const file = str(a, "identity") || path.join(dataHome(a), "identity.json");
   mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(file, JSON.stringify({ ...ident, zones: j.zones ?? [] }, null, 2));
@@ -532,13 +544,22 @@ function help() {
         start a bare relay (durable WebSocket hub).
 
   conclave serve [--port 8787] [--http 8088] [--data <dir>] [--token <t>] [--admin-token <a>]
-        full coordination server: WS bus + HTTP API for tasks (GET/POST /tasks),
-        conversation history (GET /messages), and data exchange (POST/GET /blobs).
-        --admin-token turns on SECURE MODE: per-agent enrolled identities + signed
-        envelopes required. Deploy where both sides can reach it.
+        full coordination server: WS bus + HTTP API for tasks (GET/POST /tasks), conversation
+        history (GET /messages), data exchange (POST/GET /blobs), and an admin dashboard at
+        http://<http>/dashboard. --token gates who may connect; adding --admin-token turns on
+        SECURE MODE (per-agent enrolled identities + signed envelopes + zones) — secure mode
+        needs BOTH --token AND --admin-token. (Also reads CONCLAVE_TOKEN / CONCLAVE_ADMIN_TOKEN.)
 
-  conclave invite --as <name> [--role r] [--can-run] --admin-token <a> --url ws://host:8787
-        (admin) mint a one-time enrollment token for a new agent; prints the device's join command.
+  conclave invite --as <name> [--role r] [--zone z] [--can-run] [--pin <pubkey>]
+                  --admin-token <a> --url ws://host:8787 [--http-port 8088 | --http-url <u>]
+        (admin, secure mode) mint a one-time enrollment token; prints the device's join command.
+        --zone scopes the agent to a zone; --pin <pubkey> (from 'conclave keygen') locks enrollment
+        to one device key. Talks to the server's HTTP port (default 8088 — pass --http-port if you
+        changed --http on serve).
+
+  conclave keygen --as <name>
+        (device, optional) pre-generate this device's ed25519 keypair and print its public key,
+        so the admin can --pin it at invite time (defeats enrollment-token interception).
 
   conclave join  --as <name> --enroll <token> --url ws://host:8787 --token <t>
         (device) redeem an enrollment token: generate a local ed25519 keypair, register the
@@ -567,6 +588,11 @@ function help() {
           ollama     Ollama preset (:11434)  --model <name>
           lmstudio   LM Studio preset (:1234)  --model <name>
 
+  conclave mcp   --as <name> --url ws://host:8787 [--token <t>]
+        run a Conclave MCP server (stdio) so a Claude Code instance becomes a bus agent —
+        'claude mcp add conclave -- conclave mcp --as me --url ws://host:8787 --token <t>'.
+        Tools: conclave_roster / conclave_send / conclave_inbox (+ inbound push).
+
   conclave human --as <name> [--port 7070] (transport flags as above)
         run a web UI that puts YOU on the bus as an agent (inbox + send form).
         Also receives loop-guard escalations from other agents.
@@ -586,14 +612,31 @@ function help() {
         (transport flags as above)
 
 Examples:
+  # local, no auth (trusted machine only)
   conclave up --port 8787
-  conclave join --as laptop --url ws://10.0.0.5:8787
+  conclave join --as laptop --url ws://localhost:8787
+
+  # secure: server + enroll a node + open the dashboard
+  conclave serve --token <connect> --admin-token <admin>            # on the server host
+  conclave invite --as gpu --role deploy --zone s-main \\
+      --admin-token <admin> --url ws://HOST:8787                    # on the admin machine
+  conclave join --as gpu --enroll <token> --url ws://HOST:8787 --token <connect>   # on the device
+  #   then open  http://HOST:8088/dashboard  and paste <admin>
+
+  # git transport (no server, firewall-friendly)
   conclave join --as gpubox --transport git --repo ~/bus --agent-dir gpubox
 `);
 }
 
 async function main() {
   const { cmd, args } = parseArgs(process.argv.slice(2));
+  // `--help`/`-h` (with or without a command) prints usage and NEVER dispatches — `serve --help`
+  // used to start a real NO-AUTH server on 8787/8088 and leave it running (a footgun that then
+  // poisoned `invite` by occupying the HTTP port).
+  if (cmd === "help" || cmd === "--help" || cmd === "-h" || args["help"] === true || args["h"] === true) {
+    help();
+    return;
+  }
   switch (cmd) {
     case "up":
       return cmdUp(args);

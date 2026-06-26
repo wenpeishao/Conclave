@@ -10,13 +10,31 @@ Three roles, three deploy paths. Pick per machine.
    └──────────────────────┘  ◀result─└──────────────────┘ ◀──────└──────────────────────────┘
 ```
 
+**Prerequisite (each machine):** `git clone … && cd conclave && npm install && npm link` so the
+`conclave` command is on your PATH. (No global install? Replace every `conclave …` below with
+`npx tsx src/cli.ts …`.)
+
 ## 1. Server (one reachable host: VM / tailscale node)
 
 ```bash
 ./deploy/server.sh
 ```
-Prints the **connect token**, the **admin token**, and a ready-to-paste `invite` command. Put
-TLS (nginx → `wss://`/`https://`) in front before real traffic.
+Prints the **connect token**, the **admin token**, and a ready-to-paste `invite` command.
+
+**Put TLS in front before real traffic** — the connect token crosses the wire. With a domain,
+Caddy terminates TLS for both the WS bus (`:8787`) and the HTTP API + dashboard (`:8088`)
+(`/etc/caddy/Caddyfile`):
+
+```caddy
+conclave.example.com {
+    @ws header Connection *Upgrade*
+    reverse_proxy @ws 127.0.0.1:8787    # WebSocket bus  → wss://conclave.example.com
+    reverse_proxy 127.0.0.1:8088        # HTTP API + /dashboard → https://conclave.example.com/dashboard
+}
+```
+
+Agents then use `--url wss://conclave.example.com` (and `--http-url https://conclave.example.com`
+on `invite` / `join --enroll`).
 
 ## 2. Resource / coder nodes (each device)
 

@@ -1,15 +1,16 @@
 # Deploy the Conclave coordination server.
-#   CONCLAVE_TOKEN=$(openssl rand -hex 24) docker compose up -d
-# Then point agents at it:  --url ws://<host>:8787 --token <that token>
+#   CONCLAVE_TOKEN=$(openssl rand -hex 24) CONCLAVE_ADMIN_TOKEN=$(openssl rand -hex 24) docker compose up -d
+# Both tokens => SECURE mode; then enroll nodes with `conclave invite` / `join --enroll` (see deploy/).
 services:
   conclave:
-    image: wenpeishao/conclave:0.1
+    image: wenpeishao/conclave:0.2
     # build: .            # uncomment to build from this repo instead of pulling
     ports:
       - "8787:8787" # WS bus (agents connect here)
-      - "8088:8088" # HTTP API (tasks / messages / blobs)
+      - "8088:8088" # HTTP API + admin dashboard (/dashboard)
     environment:
-      CONCLAVE_TOKEN: "${CONCLAVE_TOKEN:?set CONCLAVE_TOKEN to a shared secret}"
+      CONCLAVE_TOKEN: "${CONCLAVE_TOKEN:?set CONCLAVE_TOKEN to a connect secret}"
+      CONCLAVE_ADMIN_TOKEN: "${CONCLAVE_ADMIN_TOKEN:-}" # set => SECURE mode (per-agent identities)
     volumes:
       - conclave-data:/data
     restart: unless-stopped

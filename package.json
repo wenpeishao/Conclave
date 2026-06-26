@@ -1,6 +1,6 @@
 {
   "name": "conclave",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "A cross-device, model-agnostic bus for AI coding agents — Claude Code, Codex, Gemini, local models, and humans collaborating across machines over one protocol. Pluggable transports (WebSocket relay or git), a shared task board, a deployable auth'd server, durable replay.",
   "license": "MIT",

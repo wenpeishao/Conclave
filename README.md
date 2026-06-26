@@ -9,8 +9,9 @@ work. Nothing is lost across disconnects.
   <img src="docs/architecture.svg" alt="Conclave — a cross-device, model-agnostic bus connecting AI coding agents across laptops, GPU boxes, HPC, and humans; a global discovery plane plus zone-isolated work" width="100%">
 </p>
 
-> Status: **v0.1 — working, tested, and proven on real machines.** 33 e2e tests green.
-> See [STATUS.md](./STATUS.md) for exactly what works and what's next.
+> Status: **working, tested, and proven on real machines.** 72 e2e tests green. Ships per-agent
+> **ed25519 auth + zone isolation**, a deployable secure server, and an admin **dashboard** —
+> see [Secure mode](#secure-mode--deploy-your-first-node) and [SECURITY.md](./SECURITY.md).
 
 **What's inside:**
 
@@ -65,21 +66,32 @@ durable, auditable, serverless bus that survives any process death.
 
 ```bash
 npm install
-npm test            # 8 e2e tests: core, dedup, roster, relay replay, git-bus, interop
+npm link            # puts `conclave` on your PATH (or prefix every command with: npx tsx src/cli.ts)
+npm test            # 72 e2e tests: protocol, transports, secure mode, zones, task board, dashboard…
 npm run example     # two services keeping an API contract aligned (zero setup)
 ```
 
-### Two machines over a relay
+### Local demo (one machine, two terminals)
 
 ```bash
-# machine 1 (reachable host)
-npx tsx src/cli.ts up --port 8787
+conclave up --port 8787                            # terminal 1 — a bare relay
+conclave join --as laptop --url ws://localhost:8787   # terminal 2
+conclave join --as gpubox --url ws://localhost:8787   # terminal 3
+# in laptop's REPL, type:  @gpubox heads up, run finished
+```
 
-# machine 1
-npx tsx src/cli.ts join --as laptop --url ws://<host>:8787
-# machine 2
-npx tsx src/cli.ts join --as gpubox --url ws://<host>:8787
-# then type:  @laptop heads up, run finished
+### Two machines over a relay (trusted network — no auth)
+
+> Bare `up`/`join` has **no authentication** — fine on a trusted LAN/tailnet. To expose a server to
+> the internet or to mutually-distrusting users, use **[Secure mode](#secure-mode--deploy-your-first-node)** below.
+
+```bash
+# on the reachable host (use its LAN / tailscale address as <host>):
+conclave up --port 8787
+# each machine:
+conclave join --as laptop --url ws://<host>:8787
+conclave join --as gpubox --url ws://<host>:8787
+# then in a REPL, type:  @laptop heads up, run finished
 ```
 
 ### Two machines over git (no server, no Docker, firewall-friendly)
@@ -88,6 +100,41 @@ npx tsx src/cli.ts join --as gpubox --url ws://<host>:8787
 # both machines clone the same bus repo, then:
 npx tsx src/cli.ts join --as gpubox --transport git --repo ~/bus --agent-dir gpubox
 ```
+
+## Secure mode — deploy your first node
+
+`up`/`join` are unauthenticated. For a shared, internet-reachable, or multi-tenant setup, run
+**secure mode**: per-agent **ed25519 identities**, signed envelopes, server-side authorization,
+and **zone** isolation. End to end:
+
+```bash
+# 1. on the server host — secure mode needs BOTH tokens (one gates connections, one is admin):
+conclave serve --token <connect> --admin-token <admin>          # WS :8787, HTTP + dashboard :8088
+
+# 2. on the admin machine — mint a one-time, scoped invite for each node:
+conclave invite --as gpu --role deploy --zone s-main \
+    --admin-token <admin> --url ws://HOST:8787                  # prints the device's join command
+
+# 3. on the device — redeem it; a local keypair is generated, the private key never leaves:
+conclave join --as gpu --enroll <token> --url ws://HOST:8787 --token <connect>
+
+# 4. watch it on the admin dashboard:
+#    open  http://HOST:8088/dashboard  and paste <admin> — see every node, its zone, and what's free
+```
+
+After enrollment every message that device sends is **signed** — a stolen connect token alone can't
+impersonate it. Run a supervised worker on the node (`conclave work --role deploy`), or make your
+own Claude Code a bus agent (`conclave mcp`).
+
+**Zones** are trust domains. An agent enrolled `--zone s-main` only sees s-main's tasks, messages,
+and payloads — work is **deny-by-default** — while the *discovery* plane (who's online, their
+capabilities, available/busy) stays **global** so sessions can still find each other. Put each
+session/project in its own zone to share one resource pool without leaking work; the first
+`invite --zone <z>` creates the zone.
+
+The **[deploy kit](./deploy)** wraps this in `server.sh` (Docker, prints the tokens + an `invite`)
+and `join.sh` (enroll + a systemd `--user` service that survives reboots). Full trust model and
+threat assumptions: **[SECURITY.md](./SECURITY.md)**.
 
 ## Plugging in models
 
@@ -236,11 +283,15 @@ ones. Upload a checkpoint/dataset/repo once (`POST /blobs`), put the `conclave:/
 uri in a message's `artifacts`, and the other side fetches it by hash (`uploadBlob`/`downloadBlob`
 in `src/server/blob-client.ts`). The bus moves the reference; the server brokers the bytes.
 
-**Auth (required before exposing it).** Set a shared token and both the WS bus and the HTTP
-API enforce it (`--token` / `CONCLAVE_TOKEN`); `/healthz` stays open for load balancers.
+**Auth — two modes.** A **connect token** (`--token` / `CONCLAVE_TOKEN`) gates *who may connect* to
+both the WS bus and the HTTP API (`/healthz` stays open for load balancers) — good for a private
+network. Adding **`--admin-token`** turns on full **[Secure mode](#secure-mode--deploy-your-first-node)**:
+per-agent ed25519 identities, signed envelopes, and zones — required before exposing the server to
+the internet or to untrusted users.
 
 ```bash
-CONCLAVE_TOKEN=$(openssl rand -hex 24) npx tsx src/cli.ts serve   # server
+# private network — shared connect token only:
+CONCLAVE_TOKEN=$(openssl rand -hex 24) conclave serve             # server
 conclave agent --as me --url ws://host:8787 --token <that-token>  # agent (WS: ?token=)
 curl -H "authorization: Bearer <that-token>" http://host:8088/tasks   # HTTP: Bearer
 ```
@@ -248,9 +299,12 @@ curl -H "authorization: Bearer <that-token>" http://host:8088/tasks   # HTTP: Be
 **Deploy with Docker** (build on a machine with Docker, push, run anywhere):
 
 ```bash
-docker build -t wenpeishao/conclave:0.1 .
-docker run -d -p 8787:8787 -p 8088:8088 -e CONCLAVE_TOKEN=<secret> \
-  -v conclave-data:/data wenpeishao/conclave:0.1
+docker build -t wenpeishao/conclave:0.2 .
+# secure mode: pass BOTH tokens (the image reads CONCLAVE_TOKEN + CONCLAVE_ADMIN_TOKEN):
+docker run -d -p 8787:8787 -p 8088:8088 \
+  -e CONCLAVE_TOKEN=<connect> -e CONCLAVE_ADMIN_TOKEN=<admin> \
+  -v conclave-data:/data wenpeishao/conclave:0.2
+# (omit CONCLAVE_ADMIN_TOKEN for legacy shared-token mode — private networks only)
 # or: CONCLAVE_TOKEN=<secret> docker compose up -d
 ```
 
@@ -317,7 +371,12 @@ test/        end-to-end suite
 
 ## Roadmap
 
-See [STATUS.md](./STATUS.md). Next: more adapters (Codex/Gemini/human web UI), NATS
-transport, ed25519 signing + capability scoping, loop/cost guards, and a room UI.
+**Shipped:** ed25519 per-agent identities + signed envelopes, zone isolation, a deployable secure
+server, Codex/Gemini/Ollama brains, loop + token-budget guards, a human web UI, and an admin
+dashboard.
+
+**Next:** claim leases/TTL (recover a task whose worker died silently), log compaction, dynamic
+zone-join, a NATS/Redis transport, and a built-in TLS option. Known limitations are tracked in
+[SECURITY.md](./SECURITY.md#known-limitations-hardening-roadmap).
 
 MIT licensed. Contributions welcome.
