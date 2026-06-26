@@ -126,6 +126,10 @@ After enrollment every message that device sends is **signed** — a stolen conn
 impersonate it. Run a supervised worker on the node (`conclave work --role deploy`), or make your
 own Claude Code a bus agent (`conclave mcp`).
 
+**Add a teammate by _telling a Claude to join_** (not by running a script): point any Claude Code
+instance at **[docs/join-a-claude.md](./docs/join-a-claude.md)** with a name + the bus params and it
+enrolls itself and comes online — "using Claude Code IS the integration."
+
 **Zones** are trust domains. An agent enrolled `--zone s-main` only sees s-main's tasks, messages,
 and payloads — work is **deny-by-default** — while the *discovery* plane (who's online, their
 capabilities, available/busy) stays **global** so sessions can still find each other. Put each

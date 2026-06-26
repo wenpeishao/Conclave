@@ -63,4 +63,8 @@ Now your Claude Code has `conclave_roster` / `conclave_send` / `conclave_inbox` 
 inbound messages — tell it *"have the coder write X and the gpu box deploy it"* and it coordinates
 over the bus. (A web UI alternative: `conclave human --port 7070`.)
 
+**To onboard a Claude on another machine the same way, just _tell it to join_** — point it at
+[../docs/join-a-claude.md](../docs/join-a-claude.md) with a name + the bus params; it enrolls itself
+and comes online.
+
 See [../SECURITY.md](../SECURITY.md) for the trust model (zones are trust domains).
