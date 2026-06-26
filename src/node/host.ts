@@ -234,7 +234,13 @@ export class NodeHost {
 
   private updateRoster(e: Envelope) {
     const card = e.body as AgentCard | undefined;
-    if (card && card.id) this.roster.set(card.id, { card, lastSeen: Date.now() });
+    if (!card || !card.id) return;
+    // Use the beat's OWN timestamp, not receipt time — so a REPLAYED historical presence beat
+    // (from the durable log on a fresh connect) reflects when the agent actually beat and ages out
+    // correctly, instead of every ever-seen agent looking "online". max() guards out-of-order replay.
+    const ts = typeof e.ts === "number" ? e.ts : Date.now();
+    const prev = this.roster.get(card.id);
+    this.roster.set(card.id, { card, lastSeen: Math.max(ts, prev?.lastSeen ?? 0) });
   }
 
   private markSeen(id: string) {

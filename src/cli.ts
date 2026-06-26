@@ -165,9 +165,7 @@ async function cmdSend(a: Args) {
   const name = str(a, "as", "cli");
   const to = str(a, "to");
   if (!to) throw new Error("send requires --to <agent>");
-  const card = makeCard(a, name);
-  const transport = buildTransport(transportFromArgs(a, name));
-  const host = new NodeHost({ card, transport, dataDir: dataHome(a) });
+  const host = buildHost(a, name); // signed with the device identity → works in secure mode
   await host.start();
   await host.send([to.startsWith("agent://") ? to : `agent://${to}`], {
     subject: str(a, "subject") || undefined,
@@ -177,6 +175,43 @@ async function cmdSend(a: Args) {
   await new Promise((r) => setTimeout(r, str(a, "transport") === "git" ? 1500 : 300));
   await host.stop();
   console.log(`[conclave] sent to ${to}`);
+  process.exit(0);
+}
+
+// Same-session bus access (no MCP / no reload): "who's online", straight from the server's
+// authoritative live roster (the discovery plane — connect-token holders may read it).
+async function cmdRoster(a: Args) {
+  const base = httpBase(a);
+  const token = str(a, "token") || process.env.CONCLAVE_TOKEN;
+  let res: Response;
+  try {
+    res = await fetch(`${base}/roster`, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+  } catch (e) {
+    throw new Error(`roster: can't reach ${base} — ${(e as Error).message}. If the server's HTTP isn't on 8088, pass --http-port or --http-url.`);
+  }
+  if (!res.ok) throw new Error(`roster failed: ${res.status}`);
+  const { roster } = (await res.json()) as { roster: (AgentCard & { online: boolean })[] };
+  const sorted = roster.sort((x, y) => (y.online ? 1 : 0) - (x.online ? 1 : 0) || x.id.localeCompare(y.id));
+  console.log(`roster — ${sorted.filter((r) => r.online).length}/${sorted.length} online:`);
+  for (const r of sorted) {
+    const z = r.zones?.length ? ` [${r.zones.join(",")}]` : "";
+    const caps = r.capabilities?.length ? `  ${r.capabilities.join(", ")}` : "";
+    console.log(`  ${r.online ? "●" : "○"} ${r.id}${z}  ${r.status ?? ""}${caps}`);
+  }
+}
+
+// Same-session inbox: connect, replay messages missed since last check (durable cursor in --data),
+// print them, exit. Run it again to see only newer ones.
+async function cmdInbox(a: Args) {
+  const name = str(a, "as") || os.hostname();
+  const host = buildHost(a, name);
+  const msgs: Envelope[] = [];
+  host.onMessage((e) => { if (a["events"] || e.kind !== "event") msgs.push(e); });
+  await host.start(); // replays from the persisted cursor → catches messages sent while offline
+  await new Promise((r) => setTimeout(r, a["wait"] ? Number(str(a, "wait")) : 1500));
+  if (!msgs.length) console.log("(inbox empty — nothing new since last check)");
+  else for (const e of msgs) console.log(`  ${e.from}${e.subject ? " · " + e.subject : ""}: ${typeof e.body === "string" ? e.body : JSON.stringify(e.body)}`);
+  await host.stop(); // persists the advanced cursor
   process.exit(0);
 }
 
@@ -574,7 +609,15 @@ function help() {
 
   conclave send  --as <name> --to <agent> [--subject s] [--body text]
                  [--kind message|event|request] (transport flags as above)
-        fire one message and exit.
+        fire one signed message and exit.
+
+  conclave roster --as <name> (transport flags as above)
+        one-shot "who's online" — connects, prints the live roster (id · zone · status ·
+        capabilities), exits. No MCP / no new session needed.
+
+  conclave inbox  --as <name> [--events] (transport flags as above)
+        one-shot inbox — prints messages received since your last check (durable cursor), exits.
+        Run it again for only newer ones. (send + roster + inbox = full bus access from a shell.)
 
   conclave agent --as <name> [--brain echo|claude|anthropic|codex|gemini|cli|local|ollama] [--guard N]
         run a model-driven agent that reacts to incoming messages (--guard N bounds
@@ -644,6 +687,10 @@ async function main() {
       return cmdJoin(args);
     case "send":
       return cmdSend(args);
+    case "roster":
+      return cmdRoster(args);
+    case "inbox":
+      return cmdInbox(args);
     case "agent":
       return cmdAgent(args);
     case "human":
