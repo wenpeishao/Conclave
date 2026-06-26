@@ -14,8 +14,13 @@ const pexec = promisify(execFile);
  * spawns `node src/cli.ts` directly, which bypasses this exact failure, so it needs its own guard.
  * This asserts the TREE mode (git ls-files -s), which a local `chmod` can't fake away.
  */
-test("packaging: every committed shebang file is executable (100755) in the git tree", async () => {
-  const ls = (await pexec("git", ["ls-files", "-s", "--", "*.ts", "*.sh", "*.js", "*.mjs", "*.cjs"])).stdout;
+test("packaging: every committed shebang file is executable (100755) in the git tree", async (t) => {
+  let ls: string;
+  try {
+    ls = (await pexec("git", ["ls-files", "-s", "--", "*.ts", "*.sh", "*.js", "*.mjs", "*.cjs"])).stdout;
+  } catch {
+    return t.skip("git not available — cannot inspect tree mode");
+  }
   const bad: string[] = [];
   for (const line of ls.split("\n")) {
     const m = /^(\d{6}) [0-9a-f]+ \d+\t(.+)$/.exec(line);
