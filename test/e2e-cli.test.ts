@@ -112,6 +112,24 @@ test("e2e: `send --to \"*\"` broadcast actually lands in a peer's inbox", { time
   assert.match(inbox.stdout, /BCAST_MARKER_99/, `broadcast must reach a peer's inbox:\n${inbox.stdout}\n${inbox.stderr}`);
 });
 
+test("e2e: `send` doesn't eat the inbox cursor, and `inbox` is idempotent across processes", { timeout: 90_000 }, async (t) => {
+  const bus = await secureBus(t, 3);
+  await bus.enroll("dev");
+  await bus.enroll("peer");
+
+  // peer messages dev while dev is OFFLINE — this is unread inbox waiting for dev.
+  await cli(["send", "--as", "peer", "--to", "dev", "--body", "MARKER_BEFORE", "--url", bus.WS, "--token", CT, "--data", bus.data("peer")]);
+  // dev now runs its OWN send on the SAME --data dir. It must NOT advance/consume dev's read cursor.
+  await cli(["send", "--as", "dev", "--to", "hub", "--body", "x", "--url", bus.WS, "--token", CT, "--data", bus.data("dev")]);
+
+  const first = await cli(["inbox", "--as", "dev", "--url", bus.WS, "--token", CT, "--data", bus.data("dev")]);
+  assert.match(first.stdout, /MARKER_BEFORE/, `'send' must not swallow dev's unread inbox (data loss):\n${first.stdout}\n${first.stderr}`);
+
+  // run inbox AGAIN as a fresh process: the durable cursor must have persisted → only-newer (empty).
+  const second = await cli(["inbox", "--as", "dev", "--url", bus.WS, "--token", CT, "--data", bus.data("dev")]);
+  assert.doesNotMatch(second.stdout, /MARKER_BEFORE/, `inbox must be idempotent across processes (cursor persisted):\n${second.stdout}\n${second.stderr}`);
+});
+
 test("e2e: the human cockpit connects SIGNED in secure mode (was rejected unsigned)", { timeout: 90_000 }, async (t) => {
   const bus = await secureBus(t, 2);
   await bus.enroll("cockpit");

@@ -71,7 +71,7 @@ function deviceIdentity(a: Args): StoredIdentity | undefined {
  * Build a NodeHost from flags, injecting the enrolled identity (signs envelopes + the
  * connection hello) and the agent's zone (scopes its traffic) when present.
  */
-function buildHost(a: Args, name: string): NodeHost {
+function buildHost(a: Args, name: string, opts?: { persistState?: boolean }): NodeHost {
   const ident = deviceIdentity(a);
   const zone = ident?.zones?.[0] ?? (str(a, "zone") || undefined);
   const cfg = transportFromArgs(a, name);
@@ -81,7 +81,7 @@ function buildHost(a: Args, name: string): NodeHost {
     card.id = ident.id;
     card.name = ident.name;
   }
-  return new NodeHost({ card, transport: buildTransport(cfg), dataDir: dataHome(a), identity: ident, zone });
+  return new NodeHost({ card, transport: buildTransport(cfg), dataDir: dataHome(a), identity: ident, zone, persistState: opts?.persistState });
 }
 
 function makeCard(a: Args, name: string): AgentCard {
@@ -178,7 +178,9 @@ async function cmdSend(a: Args) {
   const name = str(a, "as", "cli");
   const to = str(a, "to");
   if (!to) throw new Error("send requires --to <agent>");
-  const host = buildHost(a, name); // signed with the device identity → works in secure mode
+  // persistState:false → a one-shot send reads the cursor (to replay/sign correctly) but never
+  // ADVANCES the on-disk inbox cursor, so it can't silently swallow unread messages from `inbox`.
+  const host = buildHost(a, name, { persistState: false }); // signed identity → works in secure mode
   await host.start();
   // "*" is the broadcast address (string), NOT an agent id — wrapping it into ["agent://*"] sends
   // to a recipient nobody matches, so the message lands nowhere. Keep it as the literal "*".
@@ -472,7 +474,9 @@ async function cmdWork(a: Args) {
 async function cmdBoard(a: Args) {
   const sub = str(a, "_sub") || "list"; // set by main() from the positional arg
   const name = str(a, "as", "board-cli");
-  const host = buildHost(a, name);
+  // persistState:false: board ops share a --data dir with `inbox`; don't advance its read cursor.
+  // (TaskBoard still requireFullReplay()s, so the board itself rebuilds completely.)
+  const host = buildHost(a, name, { persistState: false });
   const { TaskBoard } = await import("./agent/task-board.js");
   const board = new TaskBoard(host);
   await host.start();

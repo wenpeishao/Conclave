@@ -25,6 +25,9 @@ export interface HostOpts {
   zone?: string; // if set, outgoing envelopes are stamped with this zone (scoped delivery)
   replayFromZero?: boolean; // ignore the persisted cursor/seen → full replay each start (the
   // server hub uses this so its in-memory board fully rebuilds from the durable log on restart)
+  persistState?: boolean; // default true. false = read the cursor on start but NEVER advance it on
+  // disk — for one-shot senders (send/board) that share a --data dir with `inbox`, so they don't
+  // consume the inbox's durable read cursor (silent message loss for the human running both).
 }
 
 type MsgHandler = (e: Envelope) => void | Promise<void>;
@@ -45,6 +48,7 @@ export class NodeHost {
   private identity?: Identity;
   private zone?: string;
   private replayFromZero: boolean;
+  private persistState: boolean;
 
   private seq = 0;
   private cursor: string | null = null;
@@ -68,6 +72,7 @@ export class NodeHost {
     this.identity = o.identity;
     this.zone = o.zone;
     this.replayFromZero = o.replayFromZero ?? false;
+    this.persistState = o.persistState ?? true;
   }
 
   /** Register a sink for messages addressed to this agent. */
@@ -281,11 +286,18 @@ export class NodeHost {
     }
   }
 
+  private saveFailures = 0;
   private scheduleSave(): Promise<void> {
+    if (!this.persistState) return Promise.resolve(); // one-shot senders never advance the on-disk cursor
     this.saveChain = this.saveChain
       .then(() => this.flush())
+      .then(() => { this.saveFailures = 0; })
       .catch((e) => {
-        console.error("[conclave] state save error:", e);
+        // A persistent save failure means cursor+seen aren't durable → on the next reconnect the host
+        // re-replays and RE-DELIVERS already-handled messages. Surface it loudly (not a silent one-off).
+        this.saveFailures++;
+        if (this.saveFailures === 1 || this.saveFailures % 10 === 0)
+          console.error(`[conclave] STATE SAVE FAILING (${this.saveFailures}x) — cursor not durable, duplicate delivery likely: ${(e as Error).message}`);
       });
     return this.saveChain;
   }
@@ -300,23 +312,30 @@ export class NodeHost {
     // Unique tmp name per write so concurrent flushes never rename the same file twice.
     const tmp = path.join(this.dataDir, `state.${process.pid}.${++this.saveCounter}.tmp`);
     const dst = path.join(this.dataDir, "state.json");
-    await fs.writeFile(tmp, JSON.stringify(s));
-    // Atomic rename. On Windows it can hit EPERM/EACCES/EBUSY when the destination is momentarily
-    // held open (AV, indexer, a concurrent reader) — retry, else the cursor never persists and a
-    // reconnect re-replays already-seen messages (duplicate delivery).
-    for (let attempt = 0; ; attempt++) {
-      try {
-        await fs.rename(tmp, dst);
-        return;
-      } catch (e) {
-        const code = (e as NodeJS.ErrnoException).code;
-        if ((code === "EPERM" || code === "EACCES" || code === "EBUSY") && attempt < 10) {
-          await new Promise((r) => setTimeout(r, 20 * (attempt + 1)));
-          continue;
-        }
-        await fs.rm(tmp, { force: true }).catch(() => {}); // don't leak the tmp on a hard failure
-        throw e;
+    // BOTH the tmp write and the atomic rename can hit EPERM/EACCES/EBUSY on Windows (AV / indexer /
+    // a concurrent reader). Retry both — covering only the rename left writeFile able to fail straight
+    // through, dropping the cursor → duplicate delivery, the exact failure the retry was added for.
+    await withSaveRetry(() => fs.writeFile(tmp, JSON.stringify(s)));
+    try {
+      await withSaveRetry(() => fs.rename(tmp, dst));
+    } catch (e) {
+      await fs.rm(tmp, { force: true }).catch(() => {}); // don't leak the tmp on a hard failure
+      throw e;
+    }
+  }
+}
+
+async function withSaveRetry<T>(op: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await op();
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if ((code === "EPERM" || code === "EACCES" || code === "EBUSY") && attempt < 10) {
+        await new Promise((r) => setTimeout(r, 20 * (attempt + 1)));
+        continue;
       }
+      throw e;
     }
   }
 }
