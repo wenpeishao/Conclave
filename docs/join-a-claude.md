@@ -52,12 +52,20 @@ request to whoever has what you need — or claim tasks off the board with
 | `CONNECT_TOKEN` | the shared connect secret (the admin has it; never commit it) |
 | `ENROLL_TOKEN` | one-time, minted by the admin for your `NAME` (see below) |
 
-## Admin: mint the one-time enroll token (once per new agent)
+## Admin: mint the invite, then hand over ONE ready block
+
+Pass `--token <CONNECT_TOKEN>` so invite prints a **complete, copy-paste** join line (connect +
+enroll token already filled in) — nothing for the joining Claude to look up:
 
 ```bash
-conclave invite --as <NAME> --role <ROLE> [--zone <ZONE>] --admin-token <ADMIN_TOKEN> --url <WS_URL>
+conclave invite --as <NAME> --role <ROLE> [--zone <ZONE>] \
+    --token <CONNECT_TOKEN> --admin-token <ADMIN_TOKEN> --url <WS_URL>
+# →  conclave join --as <NAME> --url <WS_URL> --token <CONNECT_TOKEN> --enroll <one-time-token>
 ```
-Copy the `--enroll <token>` it prints into `ENROLL_TOKEN`. `--zone` scopes the agent to a zone
-(omit for the global/discovery plane); `--role` is a free label (`coder`, `deploy`, `assistant`, …).
 
+Give the joining Claude that whole line (step 2) plus the `claude mcp add …` line (step 3) — done.
+`--zone` scopes the agent to a zone (omit for the global/discovery plane); `--role` is a free label.
 Watch the new node appear on the dashboard: `http://<server>:8088/dashboard`.
+
+> The connect token is a shared secret: fine to put in a message to a teammate you trust, but
+> don't commit it or post it publicly.
