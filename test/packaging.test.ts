@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { readFileSync } from "node:fs";
+import { readFileSync, accessSync, constants } from "node:fs";
+import path from "node:path";
 
 const pexec = promisify(execFile);
 
@@ -33,4 +34,23 @@ test("packaging: every committed shebang file is executable (100755) in the git 
     [],
     `shebang entry file(s) committed non-executable — a fresh clone's command won't run.\nfix: git update-index --chmod=+x <file>\noffenders:\n  ${bad.join("\n  ")}`,
   );
+});
+
+/**
+ * The strongest form: actually RUN the bin as an executable (the OS resolves the shebang), the way
+ * `conclave` and the MCP server that spawns it do — not `node src/cli.ts`. Skips on Windows (no
+ * shebang execution) and where the working copy isn't executable (core.fileMode quirks); the tree
+ * mode is asserted unconditionally above. On Unix this is the only check that would have caught
+ * "the installed command doesn't start at all."
+ */
+test("packaging: the bin runs via its shebang + exec-bit (not just via `node`)", { timeout: 60_000 }, async (t) => {
+  if (process.platform === "win32") return t.skip("shebang execution is not applicable on Windows");
+  const bin = path.resolve("src/cli.ts");
+  try {
+    accessSync(bin, constants.X_OK);
+  } catch {
+    return t.skip("working copy not executable here (core.fileMode?) — tree mode is covered above");
+  }
+  const r = await pexec(bin, ["--help"], { timeout: 50_000 }); // OS execs it → shebang → npx tsx
+  assert.match(r.stdout, /conclave|serve|usage/i, `the bin must run as an executable and print help:\n${r.stdout}`);
 });
