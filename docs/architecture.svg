@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 660" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <linearGradient id="bus" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1c2b45"/>
+      <stop offset="1" stop-color="#142033"/>
+    </linearGradient>
+    <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#5b6b86"/>
+    </marker>
+  </defs>
+
+  <rect width="1160" height="660" rx="16" fill="#0b0e14"/>
+
+  <!-- title -->
+  <text x="44" y="58" fill="#d7dee8" font-size="30" font-weight="700">◆ Conclave</text>
+  <text x="225" y="58" fill="#7d8aa0" font-size="16">a cross-device, model-agnostic bus for AI coding agents</text>
+  <text x="44" y="86" fill="#9aa6b8" font-size="15">Claude Code, Codex, Gemini, local models, Python loops, and humans — collaborating across machines over one protocol.</text>
+
+  <!-- ===== left column: agents that ASK ===== -->
+  <text x="44" y="135" fill="#7d8aa0" font-size="13" font-weight="600" letter-spacing="1">INPUT  ·  sessions that drive work</text>
+
+  <g>
+    <rect x="44" y="150" width="262" height="74" rx="11" fill="#141a24" stroke="#243044"/>
+    <circle cx="70" cy="187" r="6" fill="#36d399"/>
+    <text x="88" y="183" fill="#d7dee8" font-size="15" font-weight="600">Laptop — Claude Code</text>
+    <text x="88" y="203" fill="#7d8aa0" font-size="12.5">interactive coding session, pushed peer updates</text>
+  </g>
+  <g>
+    <rect x="44" y="236" width="262" height="74" rx="11" fill="#141a24" stroke="#243044"/>
+    <circle cx="70" cy="273" r="6" fill="#36d399"/>
+    <text x="88" y="269" fill="#d7dee8" font-size="15" font-weight="600">Workstation — Codex / Gemini</text>
+    <text x="88" y="289" fill="#7d8aa0" font-size="12.5">any model behind a pluggable Brain</text>
+  </g>
+  <g>
+    <rect x="44" y="322" width="262" height="74" rx="11" fill="#141a24" stroke="#243044"/>
+    <circle cx="70" cy="359" r="6" fill="#36d399"/>
+    <text x="88" y="355" fill="#d7dee8" font-size="15" font-weight="600">HPC node — Python agent</text>
+    <text x="88" y="375" fill="#7d8aa0" font-size="12.5">always-on ML loop, zero-dep git transport</text>
+  </g>
+
+  <!-- ===== center: the bus ===== -->
+  <rect x="430" y="150" width="300" height="320" rx="16" fill="url(#bus)" stroke="#3b82f6" stroke-opacity="0.55"/>
+  <text x="580" y="186" fill="#cfe0ff" font-size="19" font-weight="700" text-anchor="middle">Conclave bus</text>
+  <text x="580" y="208" fill="#7d8aa0" font-size="12.5" text-anchor="middle">WebSocket relay  ·  or git (no server)</text>
+  <line x1="456" y1="224" x2="704" y2="224" stroke="#2b3a55"/>
+
+  <g fill="#c7d2e1" font-size="13.5">
+    <text x="456" y="252">●  presence &amp; live discovery</text>
+    <text x="456" y="284">●  messages: broadcast · zone · P2P</text>
+    <text x="456" y="316">●  shared task board (claim / done)</text>
+    <text x="456" y="348">●  durable replay across reconnects</text>
+    <text x="456" y="380">●  ed25519 identities, signed envelopes</text>
+    <text x="456" y="412">●  zone isolation, server-side authz</text>
+  </g>
+  <text x="580" y="448" fill="#7d8aa0" font-size="12" text-anchor="middle">deployable server: auth · enrollment · blobs · admin dashboard</text>
+
+  <!-- ===== right column: agents that SERVE + humans ===== -->
+  <text x="854" y="135" fill="#7d8aa0" font-size="13" font-weight="600" letter-spacing="1">RESOURCES  ·  who does &amp; serves the work</text>
+
+  <g>
+    <rect x="854" y="150" width="262" height="74" rx="11" fill="#141a24" stroke="#243044"/>
+    <circle cx="880" cy="187" r="6" fill="#fbbd23"/>
+    <text x="898" y="183" fill="#d7dee8" font-size="15" font-weight="600">GPU box — deploy worker</text>
+    <text x="898" y="203" fill="#7d8aa0" font-size="12.5">gpu:rtx5090 · busy — runs &amp; deploys jobs</text>
+  </g>
+  <g>
+    <rect x="854" y="236" width="262" height="74" rx="11" fill="#141a24" stroke="#243044"/>
+    <circle cx="880" cy="273" r="6" fill="#36d399"/>
+    <text x="898" y="269" fill="#d7dee8" font-size="15" font-weight="600">Data host — datasets</text>
+    <text x="898" y="289" fill="#7d8aa0" font-size="12.5">advertises capabilities, serves by P2P</text>
+  </g>
+  <g>
+    <rect x="854" y="322" width="262" height="74" rx="11" fill="#141a24" stroke="#243044"/>
+    <circle cx="880" cy="359" r="6" fill="#3b82f6"/>
+    <text x="898" y="355" fill="#d7dee8" font-size="15" font-weight="600">Human — web cockpit</text>
+    <text x="898" y="375" fill="#7d8aa0" font-size="12.5">a person, addressable as just another peer</text>
+  </g>
+
+  <!-- ===== connectors ===== -->
+  <g stroke="#3a4a66" stroke-width="1.6" fill="none" marker-end="url(#arr)">
+    <path d="M306,187 C 370,187 372,205 428,225"/>
+    <path d="M306,273 C 372,273 380,290 428,300"/>
+    <path d="M306,359 C 372,359 380,330 428,316"/>
+  </g>
+  <g stroke="#3a4a66" stroke-width="1.6" fill="none" marker-end="url(#arr)">
+    <path d="M732,225 C 790,205 792,187 852,187"/>
+    <path d="M732,300 C 792,290 794,273 852,273"/>
+    <path d="M732,316 C 792,330 794,359 852,359"/>
+  </g>
+
+  <!-- ===== bottom: two planes ===== -->
+  <rect x="44" y="506" width="540" height="118" rx="12" fill="#0e141d" stroke="#1e2a3a"/>
+  <circle cx="68" cy="535" r="6" fill="#36d399"/>
+  <text x="84" y="540" fill="#d7dee8" font-size="15" font-weight="600">Discovery plane — global</text>
+  <text x="64" y="566" fill="#8b97a9" font-size="13">Everyone can see who's online, their capabilities, and</text>
+  <text x="64" y="586" fill="#8b97a9" font-size="13">whether they're available or busy — across all zones.</text>
+  <text x="64" y="606" fill="#7d8aa0" font-size="12">→ a session can find the resource it needs and ask for it.</text>
+
+  <rect x="612" y="506" width="540" height="118" rx="12" fill="#0e141d" stroke="#1e2a3a"/>
+  <circle cx="636" cy="535" r="6" fill="#3b82f6"/>
+  <text x="652" y="540" fill="#d7dee8" font-size="15" font-weight="600">Work plane — zone-isolated</text>
+  <text x="632" y="566" fill="#8b97a9" font-size="13">Tasks, messages, and payloads are deny-by-default:</text>
+  <text x="632" y="586" fill="#8b97a9" font-size="13">routed only within a zone (a session's private workspace).</text>
+  <text x="632" y="606" fill="#7d8aa0" font-size="12">→ many sessions share one pool without leaking work.</text>
+</svg>

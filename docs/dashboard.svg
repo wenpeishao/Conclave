@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 700" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <rect width="1160" height="700" rx="12" fill="#0b0e14"/>
+
+  <!-- header bar -->
+  <rect width="1160" height="48" fill="#141a24"/>
+  <line x1="0" y1="48" x2="1160" y2="48" stroke="#222c3a"/>
+  <text x="20" y="30" fill="#d7dee8" font-size="15" font-weight="700">◆ Conclave</text>
+  <g font-size="13"><text x="118" y="30" fill="#7d8aa0"><tspan fill="#d7dee8" font-weight="600">8</tspan> nodes</text>
+  <text x="186" y="30" fill="#7d8aa0"><tspan fill="#d7dee8" font-weight="600">6</tspan> online</text>
+  <text x="256" y="30" fill="#7d8aa0"><tspan fill="#d7dee8" font-weight="600">5</tspan> free</text>
+  <text x="316" y="30" fill="#7d8aa0"><tspan fill="#d7dee8" font-weight="600">4</tspan> zones</text></g>
+  <rect x="952" y="13" width="120" height="22" rx="6" fill="#0b0e14" stroke="#222c3a"/>
+  <text x="962" y="29" fill="#566073" font-size="12">admin token ••••</text>
+  <rect x="1080" y="13" width="62" height="22" rx="6" fill="#1e2733" stroke="#222c3a"/>
+  <text x="1090" y="29" fill="#d7dee8" font-size="12">Connect</text>
+
+  <!-- tab bar -->
+  <rect y="48" width="1160" height="34" fill="#10151d"/>
+  <line x1="0" y1="82" x2="1160" y2="82" stroke="#222c3a"/>
+  <rect x="16" y="55" width="58" height="20" rx="5" fill="#1e2733" stroke="#222c3a"/>
+  <text x="28" y="69" fill="#d7dee8" font-size="12.5">Graph</text>
+  <text x="92" y="69" fill="#7d8aa0" font-size="12.5">Capacity</text>
+  <text x="168" y="69" fill="#7d8aa0" font-size="12.5">Columns</text>
+  <text x="244" y="69" fill="#7d8aa0" font-size="12.5">Table</text>
+  <text x="300" y="69" fill="#7d8aa0" font-size="12.5">Treemap</text>
+
+  <!-- ===== topology graph ===== -->
+  <!-- edges -->
+  <g stroke="rgba(120,140,170,0.28)" stroke-width="1.4">
+    <line x1="540" y1="300" x2="470" y2="430"/> <!-- bridge - s-pipe -->
+    <line x1="540" y1="300" x2="620" y2="260"/> <!-- bridge - s-gpu -->
+    <line x1="380" y1="350" x2="470" y2="430"/> <!-- lab-archiver - s-pipe -->
+    <line x1="360" y1="500" x2="470" y2="430"/> <!-- lab-coder - s-pipe -->
+    <line x1="560" y1="350" x2="620" y2="260"/> <!-- rtx5090 - s-gpu -->
+    <line x1="730" y1="320" x2="620" y2="260"/> <!-- a100-box - s-gpu -->
+    <line x1="700" y1="200" x2="620" y2="260"/> <!-- old-worker - s-gpu -->
+    <line x1="860" y1="520" x2="780" y2="470"/> <!-- data-host - s-data -->
+    <line x1="600" y1="600" x2="600" y2="540"/> <!-- hub - no zone -->
+  </g>
+
+  <!-- zone hubs -->
+  <g>
+    <circle cx="620" cy="260" r="16" fill="rgba(59,130,246,0.18)" stroke="#3b82f6" stroke-width="1.6"/>
+    <text x="620" y="296" fill="#cfe0ff" font-size="12" font-weight="600" text-anchor="middle">s-gpu</text>
+    <circle cx="470" cy="430" r="16" fill="rgba(59,130,246,0.18)" stroke="#3b82f6" stroke-width="1.6"/>
+    <text x="470" y="466" fill="#cfe0ff" font-size="12" font-weight="600" text-anchor="middle">s-pipe</text>
+    <circle cx="780" cy="470" r="16" fill="rgba(59,130,246,0.18)" stroke="#3b82f6" stroke-width="1.6"/>
+    <text x="780" y="506" fill="#cfe0ff" font-size="12" font-weight="600" text-anchor="middle">s-data</text>
+    <circle cx="600" cy="540" r="16" fill="rgba(59,130,246,0.18)" stroke="#3b82f6" stroke-width="1.6"/>
+    <text x="600" y="576" fill="#cfe0ff" font-size="12" font-weight="600" text-anchor="middle">(no zone)</text>
+  </g>
+
+  <!-- agent nodes -->
+  <g font-size="11" fill="#aeb9ca" text-anchor="middle">
+    <!-- bridge (multi-zone) -->
+    <circle cx="540" cy="300" r="8" fill="#36d399" stroke="#36d399"/><text x="540" y="321">bridge</text>
+    <!-- lab-coder -->
+    <circle cx="360" cy="500" r="8" fill="#36d399" stroke="#36d399"/><text x="360" y="521">lab-coder</text>
+    <!-- lab-archiver offline -->
+    <circle cx="380" cy="350" r="8" fill="#566073" stroke="#566073"/><text x="380" y="371">lab-archiver</text>
+    <!-- rtx5090 busy -->
+    <circle cx="560" cy="350" r="11" fill="none" stroke="rgba(251,189,35,0.5)"/>
+    <circle cx="560" cy="350" r="8" fill="#fbbd23" stroke="#fbbd23"/><text x="560" y="372">rtx5090</text>
+    <!-- a100-box -->
+    <circle cx="730" cy="320" r="8" fill="#36d399" stroke="#36d399"/><text x="730" y="341">a100-box</text>
+    <!-- old-worker offline -->
+    <circle cx="700" cy="200" r="8" fill="#566073" stroke="#566073"/><text x="700" y="221">old-worker</text>
+    <!-- data-host -->
+    <circle cx="860" cy="520" r="8" fill="#36d399" stroke="#36d399"/><text x="860" y="541">data-host</text>
+    <!-- hub (server, self ring) -->
+    <circle cx="600" cy="600" r="12" fill="none" stroke="#cfe0ff" stroke-width="1"/>
+    <circle cx="600" cy="600" r="8" fill="#36d399" stroke="#36d399"/><text x="600" y="622">hub</text>
+  </g>
+
+  <!-- tooltip on rtx5090 (shows the hover detail) -->
+  <g>
+    <rect x="584" y="332" width="196" height="96" rx="8" fill="#0b0e14" stroke="#222c3a"/>
+    <text x="596" y="352" fill="#d7dee8" font-size="12.5" font-weight="600">rtx5090</text>
+    <g font-size="11.5"><text x="596" y="372" fill="#7d8aa0">status</text><text x="768" y="372" fill="#fbbd23" font-weight="600" text-anchor="end">busy</text>
+    <text x="596" y="390" fill="#7d8aa0">role</text><text x="768" y="390" fill="#d7dee8" text-anchor="end">deploy</text>
+    <text x="596" y="408" fill="#7d8aa0">zones</text><text x="768" y="408" fill="#d7dee8" text-anchor="end">s-gpu</text></g>
+    <rect x="596" y="414" width="98" height="14" rx="3" fill="#1e2733"/><text x="601" y="425" fill="#aab6c8" font-size="10.5">gpu:rtx5090-32gb</text>
+  </g>
+
+  <!-- legend -->
+  <g font-size="12" fill="#7d8aa0">
+    <rect x="16" y="652" width="430" height="30" rx="8" fill="rgba(20,26,36,0.85)" stroke="#222c3a"/>
+    <circle cx="34" cy="667" r="5" fill="#36d399"/><text x="44" y="671">online</text>
+    <circle cx="104" cy="667" r="5" fill="#fbbd23"/><text x="114" y="671">busy</text>
+    <circle cx="166" cy="667" r="5" fill="#566073"/><text x="176" y="671">offline</text>
+    <circle cx="240" cy="667" r="5" fill="#f87272"/><text x="250" y="671">revoked</text>
+    <circle cx="320" cy="667" r="5" fill="#3b82f6"/><text x="330" y="671">zone</text>
+  </g>
+</svg>

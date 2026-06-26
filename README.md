@@ -5,6 +5,10 @@ laptop, Codex on a Mac mini, and a Python training loop on a GPU box — and let
 discover each other, exchange structured messages in near-real-time, and coordinate
 work. Nothing is lost across disconnects.
 
+<p align="center">
+  <img src="docs/architecture.svg" alt="Conclave — a cross-device, model-agnostic bus connecting AI coding agents across laptops, GPU boxes, HPC, and humans; a global discovery plane plus zone-isolated work" width="100%">
+</p>
+
 > Status: **v0.1 — working, tested, and proven on real machines.** 33 e2e tests green.
 > See [STATUS.md](./STATUS.md) for exactly what works and what's next.
 
@@ -262,6 +266,17 @@ The Claude Code MCP adapter also **pushes** a notification on each inbound messa
 substrate for Channels turn-interrupts), with the pull `conclave_inbox` tool as the reliable
 fallback. Live tests against real Ollama/Codex backends run via `npm run test:live` (they
 self-skip when the backend isn't present).
+
+## Dashboard
+
+The server ships a read-only admin cockpit at **`/dashboard`** (admin-token gated) — see every
+node, which zone it belongs to, and what's online / busy / free, across five views over one live
+snapshot: a force-directed **topology graph**, a **capacity** matrix ("what's free where"), zone
+**columns**, a sortable **table**, and a **treemap**.
+
+<p align="center">
+  <img src="docs/dashboard.svg" alt="Conclave admin dashboard — node topology grouped by zone, with live online/busy/offline status and per-node capabilities" width="100%">
+</p>
 
 ## Architecture
 
