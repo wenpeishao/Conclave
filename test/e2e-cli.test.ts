@@ -130,6 +130,22 @@ test("e2e: `send` doesn't eat the inbox cursor, and `inbox` is idempotent across
   assert.doesNotMatch(second.stdout, /MARKER_BEFORE/, `inbox must be idempotent across processes (cursor persisted):\n${second.stdout}\n${second.stderr}`);
 });
 
+test("e2e: /roster does not leak zone topology to a connect-token-only caller", { timeout: 90_000 }, async (t) => {
+  const bus = await secureBus(t, 5);
+  // enroll an agent INTO a zone, then bring it online
+  const inv = await cli(["invite", "--as", "zoner", "--role", "w", "--zone", "s-secret", "--admin-token", AT, "--url", bus.WS, "--http-port", bus.HP]);
+  const tok = /--enroll (\S+)/.exec(inv.stdout)?.[1];
+  assert.ok(tok, `invite --zone should print an enroll token:\n${inv.stdout}\n${inv.stderr}`);
+  await cli(["join", "--as", "zoner", "--enroll", tok!, "--url", bus.WS, "--token", CT, "--http-port", bus.HP, "--data", bus.data("zoner")]);
+  bus.spawnKid(["agent", "--as", "zoner", "--brain", "echo", "--no-self-update", "--zone", "s-secret", "--url", bus.WS, "--token", CT, "--data", bus.data("zoner")]);
+  await new Promise((r) => setTimeout(r, 4000));
+
+  // A connect-token-only roster: discovery is global (zoner is visible), but its ZONE must be redacted.
+  const roster = await cli(["roster", "--as", "zoner", "--url", bus.WS, "--token", CT, "--http-port", bus.HP]);
+  assert.match(roster.stdout, /agent:\/\/zoner/, `zoner should be visible — discovery is global:\n${roster.stdout}\n${roster.stderr}`);
+  assert.doesNotMatch(roster.stdout, /s-secret/, `zone topology must NOT leak to a connect-token caller:\n${roster.stdout}\n${roster.stderr}`);
+});
+
 test("e2e: the human cockpit connects SIGNED in secure mode (was rejected unsigned)", { timeout: 90_000 }, async (t) => {
   const bus = await secureBus(t, 2);
   await bus.enroll("cockpit");

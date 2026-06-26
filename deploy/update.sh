@@ -8,18 +8,29 @@
 set -euo pipefail
 
 CONCLAVE_DIR=${CONCLAVE_DIR:-"$(cd "$(dirname "$0")/.." && pwd)"}
+BRANCH=${CONCLAVE_BRANCH:-main}
 cd "$CONCLAVE_DIR"
 
-BEFORE=$(git rev-parse --short HEAD 2>/dev/null || echo "?")
-git fetch -q origin main
-AFTER=$(git rev-parse --short origin/main 2>/dev/null || echo "?")
+# Guard the timer against crash-looping: a dirty tree or a local commit ahead of origin makes
+# `git pull --ff-only` fail under `set -e`. Skip gracefully (exit 0) instead.
+if [ -n "$(git status --porcelain)" ]; then
+  echo "[update] local changes present — skipping (commit/stash to re-enable auto-update)"
+  exit 0
+fi
+git fetch -q origin "$BRANCH"
+BEFORE=$(git rev-parse --short HEAD)
+AFTER=$(git rev-parse --short "origin/$BRANCH")
 if [ "$BEFORE" = "$AFTER" ]; then
   echo "[update] already current ($AFTER)"
   exit 0
 fi
+if ! git merge-base --is-ancestor HEAD "origin/$BRANCH"; then
+  echo "[update] local HEAD ($BEFORE) is ahead of / diverged from origin/$BRANCH — skipping"
+  exit 0
+fi
 
 echo "[update] $BEFORE -> $AFTER — pulling…"
-git pull -q --ff-only origin main
+git pull -q --ff-only origin "$BRANCH"
 npm install --no-audit --no-fund --silent
 
 # Restart any supervised conclave worker(s) on this box so the new code is live.

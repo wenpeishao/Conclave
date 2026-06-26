@@ -24,11 +24,17 @@ docker run -d --name conclave --restart unless-stopped \
   -v "${DATA_VOL}:/data" \
   "$IMAGE" >/dev/null
 
-# Wait for health.
+# Wait for health — and FAIL LOUD if it never comes up, instead of printing a "✅ up" banner that lies.
+HEALTHY=""
 for _ in $(seq 1 20); do
-  if curl -fsS "http://127.0.0.1:${HTTP_PORT}/healthz" >/dev/null 2>&1; then break; fi
+  if curl -fsS "http://127.0.0.1:${HTTP_PORT}/healthz" >/dev/null 2>&1; then HEALTHY=1; break; fi
   sleep 1
 done
+if [ -z "$HEALTHY" ]; then
+  echo "[deploy] ❌ server did not become healthy on :${HTTP_PORT} after 20s (port in use? bad image? crash?)." >&2
+  docker logs --tail 20 conclave 2>&1 | sed 's/^/[docker] /' >&2 || true
+  exit 1
+fi
 
 HOST=$(curl -fsS https://api.ipify.org 2>/dev/null || hostname)
 WS="ws://${HOST}:${WS_PORT}"

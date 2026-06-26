@@ -419,11 +419,14 @@ export class ConclaveServer {
       return send(405, { error: "method not allowed" });
     }
 
-    // The DISCOVERY plane: the live roster (who's online + capabilities + advertised zones/status).
-    // Available to any connect-token holder — discovery is intentionally global within the tenant
-    // set (an agent already receives all of this via presence on the bus). `conclave roster` uses it.
+    // The DISCOVERY plane: the live roster (who's online + capabilities + status). Available to any
+    // connect-token holder — discovery is intentionally global within the tenant set. But ZONE
+    // membership is topology (zones are trust domains), so redact it for non-admin callers in secure
+    // mode, matching the admin-gating of the roster on / and /api/nodes.
     if (req.method === "GET" && p === "/roster") {
-      return send(200, { roster: this.host.getRoster() });
+      const full = this.host.getRoster();
+      const roster = this.registry && !isAdmin ? full.map(({ zones, ...r }) => r) : full;
+      return send(200, { roster });
     }
 
     // Live node topology for the dashboard: enrolled agents (registry = authoritative zones/role)
