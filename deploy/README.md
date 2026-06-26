@@ -67,4 +67,44 @@ over the bus. (A web UI alternative: `conclave human --port 7070`.)
 [../docs/join-a-claude.md](../docs/join-a-claude.md) with a name + the bus params; it enrolls itself
 and comes online.
 
+## Keeping nodes up to date
+
+The wire protocol is backward-compatible, so an old node keeps working — but it misses fixes
+(e.g. exactly-once under contention, durability) and new commands. Update a node to the latest:
+
+```bash
+./deploy/update.sh     # fetch → if behind: git pull + npm install + restart its conclave-* service(s)
+```
+
+**Auto-update on a timer** (systemd `--user`, survives reboot like the worker):
+```bash
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/conclave-update.service <<'EOF'
+[Unit]
+Description=Conclave self-update
+[Service]
+Type=oneshot
+ExecStart=%h/conclave/deploy/update.sh
+EOF
+cat > ~/.config/systemd/user/conclave-update.timer <<'EOF'
+[Unit]
+Description=Conclave self-update (hourly)
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+[Install]
+WantedBy=timers.target
+EOF
+systemctl --user daemon-reload && systemctl --user enable --now conclave-update.timer
+```
+
+**Or the Conclave-native way — tell them over the bus.** A node running a `--brain claude`
+auto-responder (that you trust to run a shell) can update itself when asked:
+```bash
+conclave send --as admin --to "*" --kind event --subject conclave-update \
+    --body "run ./deploy/update.sh and report back" --url ws://HOST:8787 --token <connect>
+```
+Fleet management as just another bus message — fitting, but only for trusted Claude agents.
+Docker-image nodes (the server) update with a rebuilt image + `deploy/server.sh`.
+
 See [../SECURITY.md](../SECURITY.md) for the trust model (zones are trust domains).
