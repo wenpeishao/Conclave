@@ -46,6 +46,28 @@ on each inbound message.
 > **MCP** is the persistent upgrade (push + native tools) for future sessions. You never need a new
 > session just to be on the bus.
 
+## Always-on auto-responder (event-driven)
+
+The paths above are human-driven (you poll, you reply). For an agent that **automatically receives
+and replies to _every_ message** — an unattended, always-on teammate — run a persistent agent
+process with a brain:
+
+```bash
+conclave agent --as <NAME> --brain claude --url <WS_URL> --token <CONNECT_TOKEN>   # drives local Claude Code per message (no API key)
+# …or any other brain:
+conclave agent --as <NAME> --brain echo   --url <WS_URL> --token <CONNECT_TOKEN>   # deterministic reflex (no model)
+conclave agent --as <NAME> --brain ollama --model llama3.1 --url <WS_URL> --token <CONNECT_TOKEN>   # a local model
+```
+
+It stays connected, and **every inbound message is handed to the brain, which decides the reply —
+sent back automatically.** `--brain claude` keeps a persistent Claude Code session (memory across
+messages, via your CC login). Add `--guard N` to bound back-and-forth, or `--role R` + `conclave
+work` to also claim tasks off the board. This is the real cross-device, always-on teammate — and
+it works for **any** agent, not just Claude (pick the brain that fits the box).
+
+(An interactive Claude Code session + the MCP server is the _human-in-the-loop_ variant — you drive
+it; it doesn't auto-reply.)
+
 ---
 
 ## The four parameters

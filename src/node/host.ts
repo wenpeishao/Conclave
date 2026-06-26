@@ -301,7 +301,23 @@ export class NodeHost {
     const tmp = path.join(this.dataDir, `state.${process.pid}.${++this.saveCounter}.tmp`);
     const dst = path.join(this.dataDir, "state.json");
     await fs.writeFile(tmp, JSON.stringify(s));
-    await fs.rename(tmp, dst); // atomic — a crash mid-write can't corrupt state
+    // Atomic rename. On Windows it can hit EPERM/EACCES/EBUSY when the destination is momentarily
+    // held open (AV, indexer, a concurrent reader) — retry, else the cursor never persists and a
+    // reconnect re-replays already-seen messages (duplicate delivery).
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await fs.rename(tmp, dst);
+        return;
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        if ((code === "EPERM" || code === "EACCES" || code === "EBUSY") && attempt < 10) {
+          await new Promise((r) => setTimeout(r, 20 * (attempt + 1)));
+          continue;
+        }
+        await fs.rm(tmp, { force: true }).catch(() => {}); // don't leak the tmp on a hard failure
+        throw e;
+      }
+    }
   }
 }
 
