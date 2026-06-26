@@ -7,6 +7,7 @@ import { RelayServer } from "./relay/server.js";
 import { NodeHost } from "./node/host.js";
 import { buildTransport, type TransportConfig } from "./node/build.js";
 import { AutonomousAgent } from "./agent/runtime.js";
+import { startSelfUpdate } from "./node/self-update.js";
 import { echoBrain } from "./agent/brains/rule.js";
 import { generateIdentity, signData, type Identity } from "./core/identity.js";
 import type { AgentCard, Envelope } from "./core/types.js";
@@ -96,6 +97,18 @@ function makeCard(a: Args, name: string): AgentCard {
     status: "available",
     realtime: str(a, "transport", "relay") === "git" ? "poll" : "push",
   };
+}
+
+// Built-in fleet self-update for the long-running node roles. ON by default so a deployed node
+// stays on the latest pushed code with zero manual steps forever; --no-self-update to pin.
+function maybeStartSelfUpdate(a: Args, canRestart?: () => boolean): () => void {
+  if (a["no-self-update"] === true || process.env.CONCLAVE_NO_SELF_UPDATE) {
+    console.log("[conclave] self-update OFF (--no-self-update)");
+    return () => {};
+  }
+  const mins = a["self-update-interval"] ? Number(str(a, "self-update-interval")) : 60;
+  console.log(`[conclave] self-update ON — checks origin/main every ${mins}m, restarts on change`);
+  return startSelfUpdate({ intervalMs: mins * 60_000, canRestart });
 }
 
 async function cmdUp(a: Args) {
@@ -270,13 +283,16 @@ async function cmdAgent(a: Args) {
   }
 
   // Show inbound traffic in this agent's terminal so a discussion is visible live.
-  host.onMessage((e) => printIncoming(e));
+  let lastMsgAt = 0;
+  host.onMessage((e) => { lastMsgAt = Date.now(); printIncoming(e); });
 
   const agent = new AutonomousAgent(host, brain, agentOpts);
   await agent.start();
+  const stopUpdate = maybeStartSelfUpdate(a, () => Date.now() - lastMsgAt > 15_000); // not mid-conversation
   console.log(`[conclave] autonomous agent ${host.card.id} running with '${brainKind}' brain${a["guard"] ? ` (guard=${a["guard"]})` : ""}`);
   console.log("[conclave] it will react to incoming messages. Ctrl-C to stop.");
   process.on("SIGINT", () => {
+    stopUpdate();
     void agent.stop().then(() => process.exit(0));
   });
 }
@@ -427,19 +443,22 @@ async function cmdWork(a: Args) {
     brain = echoBrain();
   }
 
+  let busy = false; // gate self-update so it never restarts mid-task
   const worker = new TeamWorker(host, board, brain, {
     pollMs: a["poll"] ? Number(a["poll"]) : 2500,
     settleMs: a["settle"] ? Number(a["settle"]) : 1500,
     role: str(a, "role") || undefined,
     handoffTo: str(a, "handoff") || undefined,
     onEvent: (ev) => {
-      if (ev.type === "claim") console.log(`[${name}] claimed: ${ev.task?.title}`);
-      else if (ev.type === "done") console.log(`[${name}] done:    ${ev.task?.title}  =>  ${String(ev.result).replace(/\s+/g, " ").slice(0, 90)}`);
+      if (ev.type === "claim") { busy = true; console.log(`[${name}] claimed: ${ev.task?.title}`); }
+      else if (ev.type === "done") { busy = false; console.log(`[${name}] done:    ${ev.task?.title}  =>  ${String(ev.result).replace(/\s+/g, " ").slice(0, 90)}`); }
     },
   });
   await worker.start();
+  const stopUpdate = maybeStartSelfUpdate(a, () => !busy);
   console.log(`[conclave] team worker ${host.card.id} (${brainKind}) working the shared board. Ctrl-C to stop.`);
   process.on("SIGINT", () => {
+    stopUpdate();
     void worker.stop().then(() => process.exit(0));
   });
 }
