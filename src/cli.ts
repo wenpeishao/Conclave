@@ -180,7 +180,10 @@ async function cmdSend(a: Args) {
   if (!to) throw new Error("send requires --to <agent>");
   const host = buildHost(a, name); // signed with the device identity → works in secure mode
   await host.start();
-  await host.send([to.startsWith("agent://") ? to : `agent://${to}`], {
+  // "*" is the broadcast address (string), NOT an agent id — wrapping it into ["agent://*"] sends
+  // to a recipient nobody matches, so the message lands nowhere. Keep it as the literal "*".
+  const recipient = to === "*" ? "*" : [to.startsWith("agent://") ? to : `agent://${to}`];
+  await host.send(recipient, {
     subject: str(a, "subject") || undefined,
     body: str(a, "body"),
     kind: (str(a, "kind", "message") as Envelope["kind"]) || "message",
@@ -219,7 +222,10 @@ async function cmdInbox(a: Args) {
   const name = str(a, "as") || os.hostname();
   const host = buildHost(a, name);
   const msgs: Envelope[] = [];
-  host.onMessage((e) => { if (a["events"] || e.kind !== "event") msgs.push(e); });
+  // Events are hidden by default (board / topic machine traffic). But an explicit broadcast
+  // (to:"*" — `send --to "*" --kind event`, or the human `/all`) means "everyone read this", so
+  // always surface it; --events additionally reveals topic-scoped machine events.
+  host.onMessage((e) => { if (a["events"] || e.kind !== "event" || e.to === "*") msgs.push(e); });
   await host.start(); // replays from the persisted cursor → catches messages sent while offline
   await new Promise((r) => setTimeout(r, a["wait"] ? Number(str(a, "wait")) : 1500));
   if (!msgs.length) console.log("(inbox empty — nothing new since last check)");
@@ -518,14 +524,13 @@ async function cmdBoard(a: Args) {
 
 async function cmdHuman(a: Args) {
   const name = str(a, "as", "human");
-  const card = makeCard(a, name);
-  const host = new NodeHost({ card, transport: buildTransport(transportFromArgs(a, name)), dataDir: dataHome(a) });
+  const host = buildHost(a, name); // signed device identity → the human cockpit works in secure mode
   host.subscribe("topic://human"); // receive loop-guard escalations
   const { HumanServer } = await import("./agent/human-server.js");
   const port = a["port"] ? Number(a["port"]) : 7070;
   const server = new HumanServer({ host, port });
   await server.start();
-  console.log(`[conclave] human UI for ${card.id} at http://localhost:${server.port()}`);
+  console.log(`[conclave] human UI for ${host.card.id} at http://localhost:${server.port()}`);
   console.log("[conclave] open it in a browser; you are now an agent on the bus. Ctrl-C to stop.");
   process.on("SIGINT", () => {
     void server.stop().then(() => process.exit(0));
