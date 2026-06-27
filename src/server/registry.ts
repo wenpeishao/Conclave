@@ -102,8 +102,11 @@ export class AgentRegistry {
     if (!isValidPublicKey(publicKey)) throw new Error("publicKey is not a valid ed25519 key");
     if (p.pin && publicKey !== p.pin) throw new Error("publicKey does not match the pinned device key");
     if (!proof || !verifyData(publicKey, token, proof)) throw new Error("missing or invalid proof-of-possession");
-    const existing = this.agents.get(p.id);
-    if (existing?.revoked) throw new Error(`${p.id} is revoked; admin must rotate it before re-enrollment`);
+    // A pending token only exists for a fresh name or a REVOKED one — invite() blocks ACTIVE names.
+    // So redeeming a token for a revoked id is an admin-authorized KEY ROTATION / device replacement:
+    // overwrite the old record with the new key and clear the revocation. (Without this a revoked name
+    // was permanently bricked — invite handed out a token that enroll always rejected, so a stolen key
+    // could never be rotated out.)
     const rec: AgentRecord = {
       id: p.id,
       name: p.name,

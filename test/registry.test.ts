@@ -27,6 +27,32 @@ test("registry: invite -> enroll -> authorize signed envelope", async () => {
   assert.equal(reg.authorize(env).ok, true);
 });
 
+test("registry: an admin can ROTATE a revoked agent's key (re-invite -> re-enroll a new key)", async () => {
+  const reg = new AgentRegistry(await tmpDir());
+  await reg.load();
+
+  // enroll bot with key #1, then revoke it (e.g. the key was compromised / device lost)
+  const inv1 = reg.invite({ name: "bot", role: "w" });
+  const k1 = generateIdentity("bot");
+  reg.enroll(inv1.token, k1.publicKey, pop(k1.privateKey, inv1.token));
+  assert.equal(reg.revoke("bot"), true);
+  const oldEnv = signEnvelope(makeEnvelope({ from: "agent://bot", to: "*", body: "x" }), k1.privateKey);
+  assert.equal(reg.authorize(oldEnv).ok, false, "the revoked key is locked out");
+
+  // admin rotates: re-invite the revoked name (must mint a token) + enroll a FRESH key
+  const inv2 = reg.invite({ name: "bot", role: "w" });
+  assert.ok(inv2.token, "re-invite of a revoked name must mint a token");
+  const k2 = generateIdentity("bot");
+  const rec = reg.enroll(inv2.token, k2.publicKey, pop(k2.privateKey, inv2.token)); // was: threw "must rotate"
+  assert.equal(rec.revoked, false, "re-enrolled agent is active again");
+  assert.equal(rec.publicKey, k2.publicKey, "rotated to the new key");
+
+  // the new key is authorized; the rotated-out key still isn't (key rotation, not un-revoke of the old key)
+  const newEnv = signEnvelope(makeEnvelope({ from: "agent://bot", to: "*", body: "y" }), k2.privateKey);
+  assert.equal(reg.authorize(newEnv).ok, true, "the new key works");
+  assert.equal(reg.authorize(oldEnv).ok, false, "the old key stays dead");
+});
+
 test("registry: forgery, revocation, and unsigned are all rejected", async () => {
   const reg = new AgentRegistry(await tmpDir());
   await reg.load();
