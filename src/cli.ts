@@ -181,18 +181,30 @@ async function cmdSend(a: Args) {
   // persistState:false → a one-shot send reads the cursor (to replay/sign correctly) but never
   // ADVANCES the on-disk inbox cursor, so it can't silently swallow unread messages from `inbox`.
   const host = buildHost(a, name, { persistState: false }); // signed identity → works in secure mode
+  // Confirm REAL acceptance instead of always printing "sent": a secure server ACKs a message it
+  // accepted and REJECTs one it didn't (unsigned / not enrolled / unauthorized). Register before send.
+  let acked = false;
+  let rejected = false;
+  let sentId = "";
+  host.onAck((id) => { if (id === sentId) acked = true; });
+  host.onReject((id) => { if (id === sentId) rejected = true; });
   await host.start();
   // "*" is the broadcast address (string), NOT an agent id — wrapping it into ["agent://*"] sends
   // to a recipient nobody matches, so the message lands nowhere. Keep it as the literal "*".
   const recipient = to === "*" ? "*" : [to.startsWith("agent://") ? to : `agent://${to}`];
-  await host.send(recipient, {
+  const env = await host.send(recipient, {
     subject: str(a, "subject") || undefined,
     body: str(a, "body"),
     kind: (str(a, "kind", "message") as Envelope["kind"]) || "message",
+    wantAck: true,
   });
-  await new Promise((r) => setTimeout(r, str(a, "transport") === "git" ? 1500 : 300));
+  sentId = env.id;
+  const settle = str(a, "transport") === "git" ? 1500 : 1500;
+  for (let i = 0; i < settle / 100 && !acked && !rejected; i++) await new Promise((r) => setTimeout(r, 100));
   await host.stop();
-  console.log(`[conclave] sent to ${to}`);
+  if (rejected) throw new Error(`send to ${to} was REJECTED by the server (not enrolled / unauthorized). Enroll first: conclave join --enroll <token>`);
+  if (acked) console.log(`[conclave] sent to ${to} ✓ (acknowledged)`);
+  else console.log(`[conclave] queued to ${to} — no server ack (a legacy/no-auth server gives none; in secure mode this likely means NOT ENROLLED or unreachable — nothing was delivered)`);
   process.exit(0);
 }
 

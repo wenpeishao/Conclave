@@ -130,6 +130,24 @@ test("e2e: `send` doesn't eat the inbox cursor, and `inbox` is idempotent across
   assert.doesNotMatch(second.stdout, /MARKER_BEFORE/, `inbox must be idempotent across processes (cursor persisted):\n${second.stdout}\n${second.stderr}`);
 });
 
+test("e2e: `send` with no enrolled identity does NOT falsely report success in secure mode", { timeout: 90_000 }, async (t) => {
+  const bus = await secureBus(t, 6);
+  await bus.enroll("dev");
+
+  // "ghost" has NO identity (empty data dir) → in secure mode the server refuses it. The send must
+  // NOT print an acknowledged success, and nothing may actually be delivered.
+  const ghostDir = path.join(bus.dir, "ghost-empty");
+  const r = await cli(["send", "--as", "ghost", "--to", "dev", "--subject", "x", "--body", "GHOST_MARKER", "--url", bus.WS, "--token", CT, "--data", ghostDir]);
+  // The bug: cmdSend's final STDOUT line was "[conclave] sent to dev" (looks like success) even when
+  // the server refused the unenrolled connection. The fix prints "queued … NOT ENROLLED …" instead.
+  // Assert on STDOUT specifically (the transport's rejection log goes to stderr regardless).
+  assert.doesNotMatch(r.stdout, /sent to dev/i, `an unenrolled send must NOT print a plain "sent to dev" success on stdout:\n${r.stdout}`);
+  assert.match(r.stdout, /not enrolled|no server ack|queued|rejected/i, `it should say why nothing was delivered:\n${r.stdout}`);
+
+  const inbox = await cli(["inbox", "--as", "dev", "--url", bus.WS, "--token", CT, "--data", bus.data("dev")]);
+  assert.doesNotMatch(inbox.stdout, /GHOST_MARKER/, `an unenrolled send must not be delivered:\n${inbox.stdout}\n${inbox.stderr}`);
+});
+
 test("e2e: /roster does not leak zone topology to a connect-token-only caller", { timeout: 90_000 }, async (t) => {
   const bus = await secureBus(t, 5);
   // enroll an agent INTO a zone, then bring it online
