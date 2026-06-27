@@ -298,7 +298,7 @@ async function cmdAgent(a: Args) {
   }
 
   // Optional loop guard: --guard N caps consecutive replies to one peer (bounds discussions).
-  const agentOpts: { guard?: import("./agent/loop-guard.js").LoopGuard } = {};
+  const agentOpts: { guard?: import("./agent/loop-guard.js").LoopGuard; watchable?: boolean } = { watchable: a["watchable"] === true };
   if (a["guard"]) {
     const { LoopGuard } = await import("./agent/loop-guard.js");
     agentOpts.guard = new LoopGuard({ maxConsecutivePerPeer: Number(a["guard"]), maxRepliesPerWindow: 200, windowMs: 600000 });
@@ -316,6 +316,27 @@ async function cmdAgent(a: Args) {
   process.on("SIGINT", () => {
     stopUpdate();
     void agent.stop().then(() => process.exit(0));
+  });
+}
+
+// Live remote observability: stream an agent's inbound/outbound activity. The agent must run with
+// --watchable (it broadcasts a one-line trace per message); this subscribes and prints it.
+async function cmdWatch(a: Args) {
+  const target = str(a, "agent") || "";
+  const id = target ? (target.startsWith("agent://") ? target : `agent://${target}`) : null;
+  const name = str(a, "as") || "watcher";
+  const host = buildHost(a, name, { persistState: false });
+  host.onMessage((e) => {
+    if (e.kind !== "event" || e.subject !== "watch") return;
+    const w = e.body as { agent?: string; dir?: string; peer?: string; subj?: string; preview?: string };
+    if (id && w.agent !== id) return;
+    const t = new Date().toISOString().slice(11, 19);
+    console.log(`${t}  ${w.agent} ${w.dir === "in" ? "←" : "→"} ${w.peer}  ${w.subj ? "[" + w.subj + "] " : ""}${w.preview ?? ""}`);
+  });
+  await host.start();
+  console.log(`[conclave] watching ${id ?? "all watchable agents"} — live activity. Ctrl-C to stop.`);
+  process.on("SIGINT", () => {
+    void host.stop().then(() => process.exit(0));
   });
 }
 
@@ -736,6 +757,10 @@ function help() {
         command from an allowlisted --commander, spawns/stops/reports the device's worker agents.
         Structured ops only (status/list/spawn/stop) — never arbitrary shell. See docs/device-agent.md.
 
+  conclave watch --agent <id> (transport flags as above)
+        live remote observability: stream an agent's inbound/outbound activity (the agent must run
+        with --watchable). Your "remote control" view of what a teammate is doing, in real time.
+
 Examples:
   # local, no auth (trusted machine only)
   conclave up --port 8787
@@ -785,6 +810,8 @@ async function main() {
       return cmdWork(args);
     case "host":
       return cmdHost(args);
+    case "watch":
+      return cmdWatch(args);
     case "serve":
       return cmdServe(args);
     case "invite":

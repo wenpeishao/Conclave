@@ -49,6 +49,8 @@ export interface AgentOpts {
   budget?: TokenBudget;
   /** Topic to notify when the guard/budget trips (default topic://human). */
   escalateTo?: string;
+  /** If true, broadcast this agent's inbound/outbound activity as `watch` events (for `conclave watch`). */
+  watchable?: boolean;
 }
 
 export class AutonomousAgent {
@@ -60,6 +62,7 @@ export class AutonomousAgent {
   private budget?: TokenBudget;
   private escalateTo: string;
   private lastEscalateAt = 0;
+  private watchable: boolean;
 
   constructor(host: NodeHost, brain: Brain, opts: AgentOpts = {}) {
     this.host = host;
@@ -68,6 +71,15 @@ export class AutonomousAgent {
     this.guard = opts.guard;
     this.budget = opts.budget;
     this.escalateTo = opts.escalateTo ?? "topic://human";
+    this.watchable = opts.watchable ?? false;
+  }
+
+  /** Broadcast a one-line trace of this agent's activity so `conclave watch` can stream it live. */
+  private emitWatch(dir: "in" | "out", peer: string, kind: string | undefined, subject: string | undefined, body: unknown): void {
+    if (!this.watchable) return;
+    if (kind === "event" || kind === "presence" || kind === "ack") return; // trace conversation only — never watch/presence events (would feed back into a storm)
+    const preview = renderBody(body).replace(/\s+/g, " ").slice(0, 180);
+    void this.host.send("*", { kind: "event", subject: "watch", body: { agent: this.host.card.id, dir, peer, kind, subj: subject, preview } });
   }
 
   get card(): AgentCard {
@@ -85,6 +97,7 @@ export class AutonomousAgent {
 
   private async handle(e: Envelope): Promise<void> {
     this.record(e);
+    this.emitWatch("in", e.from, e.kind, e.subject, e.body);
 
     // Budget gate: once exhausted, stop spending on inference and hand off to a human.
     if (this.budget && this.budget.exhausted()) {
@@ -131,6 +144,7 @@ export class AutonomousAgent {
           kind: a.kind,
           corr: a.corr,
         });
+        this.emitWatch("out", peer, a.kind, a.subject, a.body);
         this.guard?.record(peer);
         this.record(sent);
       } catch (err) {

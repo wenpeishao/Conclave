@@ -49,6 +49,38 @@ test("two autonomous agents collaborate: request → compute → response", asyn
   await askAgent.stop();
 });
 
+test("watch: a --watchable agent broadcasts its inbound AND outbound as `watch` events", async () => {
+  const hub = new MemoryHub();
+  const dir = await tmpDir();
+
+  // a watchable echo bot
+  const botHost = new NodeHost({ card: card("wbot"), transport: hub.connect(), dataDir: dir, heartbeatMs: 60000 });
+  const bot = new AutonomousAgent(botHost, echoBrain(), { watchable: true });
+
+  // a watcher that collects `watch` traces (this is what `conclave watch` does)
+  const watchHost = new NodeHost({ card: card("watcher"), transport: hub.connect(), dataDir: dir, heartbeatMs: 60000 });
+  const traces: { dir?: string; agent?: string; preview?: string }[] = [];
+  watchHost.onMessage((e) => {
+    if (e.kind === "event" && e.subject === "watch") traces.push(e.body as { dir?: string; agent?: string; preview?: string });
+  });
+
+  const userHost = new NodeHost({ card: card("user2"), transport: hub.connect(), dataDir: dir, heartbeatMs: 60000 });
+
+  await bot.start();
+  await watchHost.start();
+  await userHost.start();
+
+  await userHost.send(["agent://wbot"], { body: "ping" });
+  await until(() => traces.some((t) => t.dir === "in") && traces.some((t) => t.dir === "out"));
+
+  assert.ok(traces.some((t) => t.dir === "in" && t.agent === "agent://wbot"), "watcher saw wbot's inbound");
+  assert.ok(traces.some((t) => t.dir === "out" && t.agent === "agent://wbot" && /echo: ping/.test(t.preview ?? "")), "watcher saw wbot's outbound reply");
+
+  await bot.stop();
+  await watchHost.stop();
+  await userHost.stop();
+});
+
 test("echo brain replies to a directed message", async () => {
   const hub = new MemoryHub();
   const dir = await tmpDir();
