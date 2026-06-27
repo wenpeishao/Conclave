@@ -85,6 +85,24 @@ export class RelayServer {
     this.replayVerify = fn;
   }
 
+  /**
+   * Force-close every live socket bound to an agent id (returns how many). Revocation must drop the
+   * connection, not just the registry record — otherwise a revoked/compromised key that simply keeps
+   * its socket open keeps RECEIVING every directed message and zone broadcast (routeOk reads the
+   * persisted binding, not the registry). Returns the number of sockets closed.
+   */
+  closeAgent(id: string): number {
+    let n = 0;
+    for (const [ws, b] of this.bindings) {
+      if (b.id === id) {
+        sendFrame(ws, { t: "err", reason: "revoked" });
+        ws.close(1008, "revoked");
+        n++;
+      }
+    }
+    return n;
+  }
+
   port(): number {
     const addr = this.wss?.address();
     return addr && typeof addr === "object" ? addr.port : this.wantPort;

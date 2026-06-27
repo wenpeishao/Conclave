@@ -86,6 +86,60 @@ test("secure mode: only enrolled+signed agents can act; forged/unsigned/revoked 
   await server.stop();
 });
 
+test("secure mode: revoking a LIVE agent drops its socket so it stops RECEIVING, not just publishing", async () => {
+  const dir = await tmpDir();
+  const server = new ConclaveServer({ wsPort: 0, httpPort: 0, dataDir: dir, token: CT, adminToken: AT });
+  await server.start();
+  const base = `http://127.0.0.1:${server.httpPort()}`;
+  const wsUrl = `ws://127.0.0.1:${server.wsPort()}`;
+
+  const enroll = async (name: string) => {
+    const inv = (await (await fetch(`${base}/admin/invite`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${AT}` },
+      body: JSON.stringify({ name, role: "w" }),
+    })).json()) as { enrollToken: string };
+    const id = generateIdentity(name);
+    await fetch(`${base}/enroll`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${CT}` },
+      body: JSON.stringify({ token: inv.enrollToken, publicKey: id.publicKey, proof: signData(id.privateKey, inv.enrollToken) }),
+    });
+    return id;
+  };
+  const aliceId = await enroll("alice");
+  const bobId = await enroll("bob");
+
+  // bob stays connected, collecting inbound message bodies.
+  const received: string[] = [];
+  const bob = new NodeHost({ card: { id: "agent://bob", name: "bob" }, transport: new RelayWSTransport(wsUrl, CT, bobId), dataDir: await tmpDir(), identity: bobId, heartbeatMs: 60000 });
+  bob.onMessage((e) => { if (typeof e.body === "string") received.push(e.body); });
+  await bob.start();
+  const alice = new NodeHost({ card: { id: "agent://alice", name: "alice" }, transport: new RelayWSTransport(wsUrl, CT, aliceId), dataDir: await tmpDir(), identity: aliceId, heartbeatMs: 60000 });
+  await alice.start();
+
+  // sanity: bob receives a directed message while enrolled.
+  await alice.send(["agent://bob"], { body: "BEFORE_REVOKE" });
+  await until(async () => received.includes("BEFORE_REVOKE"), 4000);
+
+  // revoke bob → the response must report the live socket was closed.
+  const rev = (await (await fetch(`${base}/admin/revoke`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${AT}` },
+    body: JSON.stringify({ name: "bob" }),
+  })).json()) as { connectionsClosed?: number };
+  assert.ok((rev.connectionsClosed ?? 0) >= 1, "revoke must close bob's live socket");
+
+  // after revoke, a message addressed to bob must NOT reach it (and it can't re-auth to replay).
+  await alice.send(["agent://bob"], { body: "AFTER_REVOKE_LEAK" });
+  await wait(1200);
+  assert.ok(!received.includes("AFTER_REVOKE_LEAK"), "a revoked agent must not keep receiving the bus");
+
+  await bob.stop();
+  await alice.stop();
+  await server.stop();
+});
+
 test("secure hardening: --admin-token requires --token; HTTP cannot launder hub-signed content", async () => {
   // Regression for the red-team CRITICAL: --admin-token alone left the WS bus open to anonymous
   // connections and let unauthenticated HTTP POSTs become hub-signed, authorized bus envelopes.

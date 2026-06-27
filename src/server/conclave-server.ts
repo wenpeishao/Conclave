@@ -407,14 +407,18 @@ export class ConclaveServer {
           // clear the in-memory ownership AND emit a board `release` (the durable claim event
           // would otherwise keep the task pinned to the revoked agent via min-ULID).
           const id = name.startsWith("agent://") ? name : `agent://${name}`;
+          // Drop the live connection so a revoked key stops RECEIVING immediately — not just losing
+          // its registry record. Without this, an already-connected revoked agent keeps reading the bus.
+          const closed = this.relay.closeAgent(id);
           for (const [tid, owner] of this.claimedTasks) if (owner === id) this.claimedTasks.delete(tid);
           for (const t of this.board.list()) {
             // Void the EXACT claim eid so even a future-dated (clock-skewed) claim is freed — a
             // plain release only voids claims older than itself, which a future ULID outranks.
             if (t.claimedBy === id && t.status === "claimed") void this.board.release(t.id, t.claimEid);
           }
+          return send(200, { revoked: true, connectionsClosed: closed });
         }
-        return send(ok ? 200 : 404, ok ? { revoked: true } : { error: "agent not found" });
+        return send(404, { error: "agent not found" });
       }
       return send(405, { error: "method not allowed" });
     }
