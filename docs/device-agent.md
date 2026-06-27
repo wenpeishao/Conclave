@@ -1,7 +1,7 @@
 # Device agent (`conclave host`) — the per-device control plane
 
-> **Status: design spec (v1 not yet implemented).** This is the security-sensitive surface — read the
-> security model before the protocol.
+> **Status: v1 implemented** — `conclave host` with `status` / `list` / `spawn` / `stop`, gated to
+> `--commander`. This is the security-sensitive surface — read the security model before the protocol.
 
 ## The four questions
 

@@ -164,6 +164,43 @@ test("e2e: /roster does not leak zone topology to a connect-token-only caller", 
   assert.doesNotMatch(roster.stdout, /s-secret/, `zone topology must NOT leak to a connect-token caller:\n${roster.stdout}\n${roster.stderr}`);
 });
 
+test("e2e: device agent — a commander spawns a worker over the bus; a non-commander is refused", { timeout: 150_000 }, async (t) => {
+  const bus = await secureBus(t, 7);
+  await bus.enroll("dev-host"); // the device agent
+  await bus.enroll("admin"); // the allowlisted commander
+  await bus.enroll("intruder"); // an enrolled-but-not-commander peer
+
+  // admin pre-mints an enroll token for the worker the device will spawn.
+  const inv = await cli(["invite", "--as", "worker1", "--role", "w", "--admin-token", AT, "--url", bus.WS, "--http-port", bus.HP]);
+  const wtok = /--enroll (\S+)/.exec(inv.stdout)?.[1];
+  assert.ok(wtok, `invite worker1:\n${inv.stdout}\n${inv.stderr}`);
+
+  // start the device agent — only agent://admin may command it.
+  bus.spawnKid(["host", "--as", "dev-host", "--commander", "agent://admin", "--url", bus.WS, "--token", CT, "--http-port", bus.HP, "--data", bus.data("dev-host")]);
+  await new Promise((r) => setTimeout(r, 4500));
+
+  const roster = async () => (await cli(["roster", "--as", "admin", "--url", bus.WS, "--token", CT, "--http-port", bus.HP])).stdout;
+  assert.match(await roster(), /agent:\/\/dev-host/, "the device agent itself must be online");
+
+  // (1) a NON-commander tries to spawn → must be refused (worker-evil never appears).
+  await cli(["send", "--as", "intruder", "--to", "dev-host", "--kind", "request", "--body",
+    JSON.stringify({ op: "spawn", name: "worker-evil", kind: "agent", brain: "echo" }),
+    "--url", bus.WS, "--token", CT, "--data", bus.data("intruder")]);
+
+  // (2) the COMMANDER spawns worker1 → device enrolls + launches it → it comes online.
+  await cli(["send", "--as", "admin", "--to", "dev-host", "--kind", "request", "--body",
+    JSON.stringify({ op: "spawn", name: "worker1", kind: "agent", brain: "echo", enroll: wtok }),
+    "--url", bus.WS, "--token", CT, "--data", bus.data("admin")]);
+
+  let r = "";
+  for (let i = 0; i < 25 && !/agent:\/\/worker1/.test(r); i++) {
+    await new Promise((res) => setTimeout(res, 1000));
+    r = await roster();
+  }
+  assert.match(r, /agent:\/\/worker1/, `the commander's spawn must bring worker1 online:\n${r}`);
+  assert.doesNotMatch(r, /worker-evil/, `a non-commander's spawn must be refused (no worker-evil):\n${r}`);
+});
+
 test("e2e: the human cockpit connects SIGNED in secure mode (was rejected unsigned)", { timeout: 90_000 }, async (t) => {
   const bus = await secureBus(t, 2);
   await bus.enroll("cockpit");

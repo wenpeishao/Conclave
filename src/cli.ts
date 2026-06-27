@@ -317,6 +317,41 @@ async function cmdAgent(a: Args) {
   });
 }
 
+async function cmdHost(a: Args) {
+  const name = str(a, "as");
+  if (!name) throw new Error("host requires --as <name>");
+  const commanders = new Set(
+    (str(a, "commander") || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((c) => (c.startsWith("agent://") ? c : `agent://${c}`)),
+  );
+  if (!commanders.size) throw new Error("host requires --commander <agent-id>[,<id>…] (who may command this device)");
+  const url = str(a, "url") || "ws://127.0.0.1:8787";
+  const token = str(a, "token") || process.env.CONCLAVE_TOKEN || "";
+  const host = buildHost(a, name);
+  const { DeviceAgent } = await import("./agent/device-agent.js");
+  const { fileURLToPath } = await import("node:url");
+  const agent = new DeviceAgent({
+    host,
+    commanders,
+    url,
+    token,
+    httpPort: str(a, "http-port") || undefined,
+    httpUrl: str(a, "http-url") || undefined,
+    cliPath: fileURLToPath(import.meta.url),
+    dataRoot: dataHome(a),
+    startedAt: Date.now(),
+  });
+  await host.start();
+  agent.start();
+  console.log(`[conclave] device agent ${host.card.id} up — commanders: ${[...commanders].join(", ")}. Ctrl-C to stop.`);
+  process.on("SIGINT", () => {
+    void agent.stopAll().then(() => process.exit(0));
+  });
+}
+
 async function cmdServe(a: Args) {
   const wsPort = a["port"] ? Number(a["port"]) : 8787;
   const httpPort = a["http"] ? Number(a["http"]) : 8088;
@@ -694,6 +729,11 @@ function help() {
         (a pipeline, e.g. coder --handoff deploy). --permission lets it run/deploy.
         (transport flags as above)
 
+  conclave host  --as <device> --commander <agent-id>[,<id>…] (transport flags as above)
+        per-device control plane (a "kubelet"): represents this device on the bus and, on GATED
+        command from an allowlisted --commander, spawns/stops/reports the device's worker agents.
+        Structured ops only (status/list/spawn/stop) — never arbitrary shell. See docs/device-agent.md.
+
 Examples:
   # local, no auth (trusted machine only)
   conclave up --port 8787
@@ -741,6 +781,8 @@ async function main() {
       return cmdBoard(args);
     case "work":
       return cmdWork(args);
+    case "host":
+      return cmdHost(args);
     case "serve":
       return cmdServe(args);
     case "invite":
