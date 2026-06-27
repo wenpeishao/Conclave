@@ -275,6 +275,8 @@ async function cmdAgent(a: Args) {
       persona: str(a, "persona") || undefined,
       model: str(a, "model") || undefined,
       effort: str(a, "effort") || undefined,
+      permissionMode: str(a, "permission") || undefined, // BUG was: dropped here, so `agent --brain claude --permission bypassPermissions` ran WITHOUT it → every tool call blocked in non-interactive claude -p → 120s timeout
+      timeoutMs: a["timeout"] ? Number(str(a, "timeout")) * 1000 : undefined,
     });
   } else if (brainKind === "codex" || brainKind === "gemini" || brainKind === "cli") {
     const { cliBrain, codexBrain, geminiBrain } = await import("./agent/brains/cli.js");
