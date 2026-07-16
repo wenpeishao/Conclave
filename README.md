@@ -130,11 +130,14 @@ own Claude Code a bus agent (`conclave mcp`).
 instance at **[docs/join-a-claude.md](./docs/join-a-claude.md)** with a name + the bus params and it
 enrolls itself and comes online — "using Claude Code IS the integration."
 
-**Zones** are trust domains. An agent enrolled `--zone s-main` only sees s-main's tasks, messages,
-and payloads — work is **deny-by-default** — while the *discovery* plane (who's online, their
-capabilities, available/busy) stays **global** so sessions can still find each other. Put each
-session/project in its own zone to share one resource pool without leaking work; the first
-`invite --zone <z>` creates the zone.
+**Zones** are trust domains that scope **broadcast work traffic** — not a hard network partition.
+Three routing planes, and zones gate exactly one: **discovery** (who's online + capabilities) stays
+**global**; **directed `agent://X` messages cross zones by design** (you can always DM a node by id);
+only **topic broadcasts + the task board** are **zone-isolated** — a zoned agent must stamp one of
+its member zones (**deny-by-default**), so its *group* work reaches same-zone members only. Put each
+session/project in its own zone to share one resource pool without leaking *broadcast* work; direct
+P2P and discovery still cross. The first `invite --zone <z>` creates the zone. Full semantics:
+**[docs/zones.md](./docs/zones.md)**.
 
 The **[deploy kit](./deploy)** wraps this in `server.sh` (Docker, prints the tokens + an `invite`)
 and `join.sh` (enroll + a systemd `--user` service that survives reboots). Full trust model and
