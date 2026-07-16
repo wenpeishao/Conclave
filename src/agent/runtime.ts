@@ -122,7 +122,19 @@ export class AutonomousAgent {
     try {
       result = await this.brain.react(ctx);
     } catch (err) {
-      console.error("[conclave] brain error:", err);
+      const why = (err as Error).message;
+      console.error("[conclave] brain error:", why);
+      // Tell the peer. A brain failure — notably a `--timeout` kill, which discards the whole turn
+      // including the reply it was composing — used to be terminal AND silent: the caller waited on
+      // a reply that could never come, indistinguishable from a dead node. It only shows in OUR log,
+      // which the caller can't read. Answer only DIRECTED conversation, and never answer a response,
+      // so two failing agents can't ping-pong error notices at each other.
+      const directed = Array.isArray(e.to) && e.to.includes(this.host.card.id);
+      if (directed && e.kind !== "response") {
+        await this.host
+          .send([e.from], { kind: "response", corr: e.id, subject: "brain-error", body: `no reply — my brain failed: ${why}` })
+          .catch(() => {});
+      }
       return;
     }
     const actions = Array.isArray(result) ? result : result.actions;

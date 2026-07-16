@@ -115,6 +115,31 @@ test("the brain is never invoked for watch/presence/ack traffic (the storm guard
   await peerHost.stop();
 });
 
+test("a brain failure is reported to the peer, not swallowed (a timeout looked like a dead node)", async () => {
+  const hub = new MemoryHub();
+  const dir = await tmpDir();
+
+  // The real case: `--timeout` kills a long tool-using turn, so the brain throws and the reply it
+  // was composing is discarded. The caller must learn that, not wait forever on silence.
+  const deadBrain: Brain = { react: async () => { throw new Error("claude timed out"); } };
+  const botHost = new NodeHost({ card: card("deadbot"), transport: hub.connect(), dataDir: dir, heartbeatMs: 60000 });
+  const bot = new AutonomousAgent(botHost, deadBrain);
+
+  const peerHost = new NodeHost({ card: card("caller"), transport: hub.connect(), dataDir: dir, heartbeatMs: 60000 });
+  const got: { subject?: string; body: unknown }[] = [];
+  peerHost.onMessage((e) => { if (e.from !== "agent://caller") got.push({ subject: e.subject, body: e.body }); });
+
+  await bot.start();
+  await peerHost.start();
+  await peerHost.send(["agent://deadbot"], { kind: "request", body: "do a long thing" });
+
+  await until(() => got.some((g) => g.subject === "brain-error"));
+  assert.match(String(got.find((g) => g.subject === "brain-error")?.body), /claude timed out/, "the peer must be told WHY it gets no answer");
+
+  await bot.stop();
+  await peerHost.stop();
+});
+
 test("echo brain replies to a directed message", async () => {
   const hub = new MemoryHub();
   const dir = await tmpDir();
