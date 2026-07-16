@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MemoryHub } from "../src/transports/memory.js";
 import { NodeHost } from "../src/node/host.js";
-import { AutonomousAgent } from "../src/agent/runtime.js";
+import { AutonomousAgent, type Brain } from "../src/agent/runtime.js";
 import { ruleBrain, echoBrain } from "../src/agent/brains/rule.js";
 import { tmpDir, card, until } from "./helpers.js";
 
@@ -79,6 +79,40 @@ test("watch: a --watchable agent broadcasts its inbound AND outbound as `watch` 
   await bot.stop();
   await watchHost.stop();
   await userHost.stop();
+});
+
+test("the brain is never invoked for watch/presence/ack traffic (the storm guard)", async () => {
+  const hub = new MemoryHub();
+  const dir = await tmpDir();
+
+  // A brain that records every envelope it is asked to react to.
+  const seen: string[] = [];
+  const spyBrain: Brain = {
+    react: async (ctx) => {
+      seen.push(`${ctx.message.kind ?? "message"}:${ctx.message.subject ?? "-"}`);
+      return [];
+    },
+  };
+  const botHost = new NodeHost({ card: card("spybot"), transport: hub.connect(), dataDir: dir, heartbeatMs: 60000 });
+  const bot = new AutonomousAgent(botHost, spyBrain);
+
+  const peerHost = new NodeHost({ card: card("peer"), transport: hub.connect(), dataDir: dir, heartbeatMs: 60000 });
+  await bot.start();
+  await peerHost.start();
+
+  // Exactly the traffic that wedged a fresh node: another agent's `watch` traces, broadcast to "*".
+  await peerHost.send("*", { kind: "event", subject: "watch", body: { agent: "agent://other", dir: "in", preview: "x" } });
+  await peerHost.send("*", { kind: "event", subject: "device-command", body: { op: "spawn" } });
+  // …and one real directed message, which MUST still reach the brain.
+  await peerHost.send(["agent://spybot"], { body: "real work" });
+
+  await until(() => seen.length > 0);
+  await new Promise((r) => setTimeout(r, 150)); // let any stragglers land
+
+  assert.deepEqual(seen, ["message:-"], `only the real message may reach the brain — got: ${JSON.stringify(seen)}`);
+
+  await bot.stop();
+  await peerHost.stop();
 });
 
 test("echo brain replies to a directed message", async () => {

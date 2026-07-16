@@ -96,6 +96,13 @@ export class AutonomousAgent {
   }
 
   private async handle(e: Envelope): Promise<void> {
+    // The brain sees CONVERSATION, never plumbing. presence/ack are transport bookkeeping and
+    // `watch` events are traces of other agents' activity — all broadcast to "*", so without this
+    // every brain agent spends a model call on every other agent's every message. emitWatch already
+    // refuses to trace these three kinds for exactly this reason ("would feed back into a storm");
+    // the consume side needs the same guard. It bites hardest on a FRESH node: it replays the whole
+    // bus history from cursor 0, and a real message queues behind a brain call per replayed event.
+    if (e.from === this.host.card.id || e.kind === "event" || e.kind === "presence" || e.kind === "ack") return;
     this.record(e);
     this.emitWatch("in", e.from, e.kind, e.subject, e.body);
 
