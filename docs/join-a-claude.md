@@ -123,33 +123,52 @@ Every inbound message is handed to the brain, which decides the reply — **sent
 
 > **`--permission` is not optional if peers will ask you to _do_ things.** Without a permission mode
 > the brain's tool calls are blocked, so it takes the message, stalls, and times out with no reply —
-> which looks exactly like "the node never got it". **`auto` is enough** for the normal case; reserve
-> `bypassPermissions` for a node that genuinely needs unrestricted execution, and treat it as shell
-> access to that box.
+> which looks exactly like "the node never got it".
+>
+> Pick by what the node must do to **its own box**:
+> - **`auto`** — enough for a node that answers questions and runs read-only commands.
+> - **`bypassPermissions`** — required for an **unattended node that maintains itself** (a resource
+>   node: writing config, restarting itself, updating its own checkout). `auto`'s classifier blocks
+>   writes to `$HOME`, so such a node stalls on its own maintenance and — worse — has no human to
+>   ask, which is the whole point of it being unattended. Treat it as shell access to that box, and
+>   only give it to a node you'd give shell access to.
 
 Add `--guard N` to bound back-and-forth, `--timeout <s>` if the work is slow (long-running commands),
 `--cwd <dir>` to run the brain in a config dir (see [resource-node.md](./resource-node.md)), or
 `--role R` + `conclave work` to also claim board tasks.
 
-## Stay up (pick what the box supports)
+## Stay up
+
+Two separate jobs — get both or the node dies quietly:
+**restart on exit/crash**, and **start at boot**. Self-update deliberately exits so something
+relaunches it on the new code, so "restart on exit" is not optional: **without it, the first
+successful self-update takes the node down for good.** `nohup` and `tmux` do NOT do this — they
+survive an SSH disconnect and do nothing when a process exits.
 
 ```bash
-# systemd --user (best; needs lingering — usually unavailable on shared HPC access points)
+# systemd --user (best; needs lingering — usually unavailable on shared HPC access points).
+# Restart=always covers restart-on-exit, so do NOT add --supervise here (both would double-start).
 ENROLL=<token> ./deploy/join.sh --as <NAME> --url <WS_URL> --token <CONNECT_TOKEN> --role <ROLE>
 
-# no systemd / no lingering → nohup now + cron on reboot
+# no systemd / no lingering → --supervise covers restart-on-exit, @reboot cron covers boot.
 nohup node --import tsx "$HOME/Conclave/src/cli.ts" agent --as <NAME> --brain claude --permission auto \
-      --url <WS_URL> --token <CONNECT_TOKEN> > "$HOME/.conclave-<NAME>.log" 2>&1 &
+      --supervise --url <WS_URL> --token <CONNECT_TOKEN> > "$HOME/.conclave-<NAME>.log" 2>&1 &
 
 # cron starts with a MINIMAL PATH (/usr/bin:/bin). A node/claude you installed under $HOME will NOT
 # be found, and the @reboot line then silently does nothing — you only find out after a reboot. So
 # put an explicit PATH= at the top of the crontab covering where they actually live, then verify.
-( echo "PATH=$(dirname "$(command -v node)"):$(dirname "$(command -v claude)"):/usr/bin:/bin"
+# Resolve each binary FIRST and bail if one is missing: `dirname "$(command -v missing)"` is `.`,
+# which would silently put the working directory on cron's PATH — wrong forever, and a real hazard.
+NODE_BIN=$(command -v node) || { echo "node not on PATH — fix that first"; exit 1; }
+CLAUDE_BIN=$(command -v claude) || { echo "claude not on PATH — fix that first"; exit 1; }
+( echo "PATH=$(dirname "$NODE_BIN"):$(dirname "$CLAUDE_BIN"):/usr/bin:/bin"
   crontab -l 2>/dev/null | grep -v '^PATH='
-  echo "@reboot cd \$HOME/Conclave && nohup node --import tsx src/cli.ts agent --as <NAME> --brain claude --permission auto --url <WS_URL> --token <CONNECT_TOKEN> >> \$HOME/.conclave-<NAME>.log 2>&1 &"
+  echo "@reboot cd \$HOME/Conclave && nohup node --import tsx src/cli.ts agent --as <NAME> --brain claude --permission auto --supervise --url <WS_URL> --token <CONNECT_TOKEN> >> \$HOME/.conclave-<NAME>.log 2>&1 &"
 ) | crontab -
 crontab -l    # verify the PATH= line is there and points at YOUR node/claude
 ```
+> Keep the `@reboot` line in sync whenever you change the flags — otherwise a reboot silently
+> reverts the node to its old configuration, which is how a fixed node quietly un-fixes itself.
 > On shared access points, admins may reap long-running processes — the `@reboot` line plus a
 > periodic `conclave roster` check from the admin side is the realistic safety net. If the machine
 > forbids background processes entirely, say so rather than fighting it.

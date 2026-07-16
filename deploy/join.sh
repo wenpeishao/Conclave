@@ -63,7 +63,11 @@ EOF
   loginctl enable-linger "$USER" >/dev/null 2>&1 || true
   echo "[join] ✅ running as systemd --user service ${UNIT} (survives reboot). Logs: journalctl --user -u ${UNIT} -f"
 else
-  echo "[join] no systemd — starting under nohup (won't survive reboot)."
-  nohup "${WORK[@]}" >"$HOME/.conclave-${NAME}.log" 2>&1 &
-  echo "[join] ✅ running (pid $!). Logs: ~/.conclave-${NAME}.log"
+  # No systemd → nothing would relaunch the node when self-update exits on purpose, and the first
+  # successful update would silently take it down for good. --supervise is the built-in stand-in
+  # (systemd's Restart=always covers it above, which is why it is NOT passed there).
+  echo "[join] no systemd — starting under nohup + --supervise (restarts on exit; add an @reboot cron for boot)."
+  nohup "${WORK[@]}" --supervise >"$HOME/.conclave-${NAME}.log" 2>&1 &
+  echo "[join] ✅ running supervised (pid $!). Logs: ~/.conclave-${NAME}.log"
+  echo "[join] ⚠ won't survive reboot — see docs/join-a-claude.md for the @reboot crontab line."
 fi
