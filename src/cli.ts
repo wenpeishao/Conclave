@@ -367,6 +367,8 @@ async function cmdHost(a: Args) {
     cliPath: fileURLToPath(import.meta.url),
     dataRoot: dataHome(a),
     startedAt: Date.now(),
+    claudeBin: str(a, "claude-bin") || undefined,
+    claudeConfig: str(a, "claude-config") || undefined,
   });
   await host.start();
   agent.start();
@@ -755,8 +757,10 @@ function help() {
 
   conclave host  --as <device> --commander <agent-id>[,<id>…] (transport flags as above)
         per-device control plane (a "kubelet"): represents this device on the bus and, on GATED
-        command from an allowlisted --commander, spawns/stops/reports the device's worker agents.
-        Structured ops only (status/list/spawn/stop) — never arbitrary shell. See docs/device-agent.md.
+        command from an allowlisted --commander, spawns/stops/resumes/reports the device's workers.
+        Structured ops only (status/list/spawn/stop/resume) — never arbitrary shell. spawn specs
+        persist, so resume brings a crashed/rebooted worker back with its identity + message
+        cursor (resume <name> | all). See docs/device-agent.md.
 
   conclave watch --agent <id> (transport flags as above)
         live remote observability: stream an agent's inbound/outbound activity (the agent must run

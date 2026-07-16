@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -199,6 +199,125 @@ test("e2e: device agent — a commander spawns a worker over the bus; a non-comm
   }
   assert.match(r, /agent:\/\/worker1/, `the commander's spawn must bring worker1 online:\n${r}`);
   assert.doesNotMatch(r, /worker-evil/, `a non-commander's spawn must be refused (no worker-evil):\n${r}`);
+});
+
+test("e2e: device agent — resume brings a persisted worker back after a host restart (no re-enroll)", { timeout: 180_000 }, async (t) => {
+  const bus = await secureBus(t, 11);
+  await bus.enroll("dev2"); // the device agent
+  await bus.enroll("boss"); // the allowlisted commander (the device's manager node)
+
+  // boss pre-mints one enroll token — used only for the FIRST spawn; resume must NOT need it.
+  const inv = await cli(["invite", "--as", "task1", "--role", "w", "--admin-token", AT, "--url", bus.WS, "--http-port", bus.HP]);
+  const wtok = /--enroll (\S+)/.exec(inv.stdout)?.[1];
+  assert.ok(wtok, `invite task1:\n${inv.stdout}\n${inv.stderr}`);
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const roster = async () => (await cli(["roster", "--as", "boss", "--url", bus.WS, "--token", CT, "--http-port", bus.HP])).stdout;
+  const command = (body: object) => cli(["send", "--as", "boss", "--to", "dev2", "--kind", "request", "--body", JSON.stringify(body), "--url", bus.WS, "--token", CT, "--data", bus.data("boss")]);
+  const hostArgs = ["host", "--as", "dev2", "--commander", "agent://boss", "--url", bus.WS, "--token", CT, "--http-port", bus.HP, "--data", bus.data("dev2")];
+  // a host variant that captures stdout, so we can assert on its log deterministically.
+  const captureHost = () => {
+    const p = spawn("node", [...NODE_ARGS, ...hostArgs], { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    p.stdout?.on("data", (d) => (out += d.toString()));
+    p.stderr?.on("data", (d) => (out += d.toString()));
+    t.after(() => p.kill());
+    return { p, out: () => out };
+  };
+
+  // --- host A: commander spawns task1 (enrolls + launches) → online, spec persisted to _specs.json.
+  const hostA = bus.spawnKid(hostArgs);
+  await sleep(4500);
+  await command({ op: "spawn", name: "task1", kind: "agent", brain: "echo", enroll: wtok });
+  let r = "";
+  for (let i = 0; i < 25 && !/agent:\/\/task1/.test(r); i++) { await sleep(1000); r = await roster(); }
+  assert.match(r, /agent:\/\/task1/, `spawn must bring task1 online:\n${r}`);
+
+  // --- simulate a device restart / host crash: kill host A.
+  hostA.kill();
+  await sleep(2500);
+
+  // --- host B on the SAME --data dir: must LOAD the persisted spec (this is what survives a reboot).
+  const hostB = captureHost();
+  await sleep(4500);
+  assert.match(hostB.out(), /loaded 1 known agent spec/i, `a restarted host must load the persisted spec:\n${hostB.out()}`);
+  assert.match(hostB.out(), /resumable: task1/i, `the persisted spec must name task1 as resumable:\n${hostB.out()}`);
+
+  // --- resume with NO enroll token → relaunch from the spec, same identity/data dir → back online.
+  await command({ op: "resume", name: "task1" });
+  for (let i = 0; i < 20 && !/launched agent task1/i.test(hostB.out()); i++) await sleep(1000);
+  assert.match(hostB.out(), /launched agent task1/i, `resume must relaunch task1 from the persisted spec (no re-enroll):\n${hostB.out()}`);
+  r = "";
+  for (let i = 0; i < 25 && !/agent:\/\/task1/.test(r); i++) { await sleep(1000); r = await roster(); }
+  assert.match(r, /agent:\/\/task1/, `resumed task1 must be back online:\n${r}`);
+
+  // --- stop = deprovision: the spec is forgotten, so a later resume must FAIL (not resurrect it).
+  await command({ op: "stop", name: "task1" });
+  await sleep(2500);
+  const before = hostB.out().length;
+  await command({ op: "resume", name: "task1" });
+  await sleep(2500);
+  assert.doesNotMatch(hostB.out().slice(before), /launched agent task1/i, `a stopped (deprovisioned) agent must NOT be resumable:\n${hostB.out().slice(before)}`);
+});
+
+test("e2e: device agent — an rc spawn wires the conclave MCP into a pre-trusted workspace + returns the claude.ai link", { timeout: 150_000 }, async (t) => {
+  const bus = await secureBus(t, 15);
+  await bus.enroll("dev3"); // the device agent
+  await bus.enroll("boss3"); // the commander (manager node)
+
+  const inv = await cli(["invite", "--as", "task2", "--role", "w", "--admin-token", AT, "--url", bus.WS, "--http-port", bus.HP]);
+  const wtok = /--enroll (\S+)/.exec(inv.stdout)?.[1];
+  assert.ok(wtok, `invite task2:\n${inv.stdout}\n${inv.stderr}`);
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  // a STUB `claude`: prints the connect link (proving the host's capture path) then stays alive
+  // like a real remote-control server — so we test the RC plumbing without a real login/subscription.
+  const stub = path.join(bus.dir, "claude-stub.mjs");
+  // prints the link then EXITS (a real remote-control server stays up, but a lingering grandchild
+  // would keep the test process from exiting on Windows — launchRC captures the link either way).
+  writeFileSync(stub, `process.stdout.write("remote-control up\\n");\nprocess.stdout.write("Steer it here: https://claude.ai/code?environment=env_STUBTASK2\\n");\n`);
+  const claudeConfig = path.join(bus.dir, "claude.json"); // isolated ~/.claude.json — never touch the real one
+
+  const command = (body: object) => cli(["send", "--as", "boss3", "--to", "dev3", "--kind", "request", "--body", JSON.stringify(body), "--url", bus.WS, "--token", CT, "--data", bus.data("boss3")]);
+  const hostArgs = ["host", "--as", "dev3", "--commander", "agent://boss3", "--url", bus.WS, "--token", CT, "--http-port", bus.HP, "--data", bus.data("dev3"), "--claude-bin", `node "${stub}"`, "--claude-config", claudeConfig];
+  const p = spawn("node", [...NODE_ARGS, ...hostArgs], { stdio: ["ignore", "pipe", "pipe"] });
+  let out = "";
+  p.stdout?.on("data", (d) => (out += d.toString()));
+  p.stderr?.on("data", (d) => (out += d.toString()));
+  // TREE-kill and AWAIT exit: the host spawns a `claude remote-control` grandchild (via shell) that
+  // runs forever; a plain p.kill() on Windows leaves the tree alive → the child handle keeps the test
+  // process from exiting. taskkill /T reaps the whole tree; awaiting p's exit releases the handle.
+  t.after(() => new Promise<void>((resolve) => {
+    p.once("exit", () => resolve());
+    if (process.platform === "win32" && p.pid) { try { spawn("taskkill", ["/F", "/T", "/PID", String(p.pid)]); } catch { p.kill(); } }
+    else p.kill();
+    setTimeout(resolve, 6000); // fallback so teardown can't hang
+  }));
+  await sleep(4500);
+
+  // --- rc spawn: enroll task2 + prepare workspace + launch remote-control + capture the link.
+  await command({ op: "spawn", name: "task2", kind: "agent", rc: true, enroll: wtok });
+  for (let i = 0; i < 30 && !/rc task2 link:/i.test(out); i++) await sleep(1000);
+  assert.match(out, /launched rc task2/i, `rc spawn must launch a remote-control session:\n${out}`);
+  assert.match(out, /rc task2 link: https:\/\/claude\.ai\/code\?environment=env_STUBTASK2/i, `the host must capture + surface the claude.ai link:\n${out}`);
+
+  // --- the workspace must be pre-trusted AND have the conclave MCP wired (so the session is on the bus).
+  const cfg = JSON.parse(readFileSync(claudeConfig, "utf8")) as { projects?: Record<string, { hasTrustDialogAccepted?: boolean; mcpServers?: Record<string, { args?: string[] }> }> };
+  const workspace = path.join(bus.data("dev3"), "task2", "workspace");
+  const proj = cfg.projects?.[workspace];
+  assert.ok(proj, `the workspace must be registered in claude config:\n${JSON.stringify(cfg.projects, null, 2)}`);
+  assert.equal(proj!.hasTrustDialogAccepted, true, "the workspace must be pre-trusted (no headless trust-dialog block)");
+  const mcpArgs = proj!.mcpServers?.conclave?.args ?? [];
+  assert.ok(mcpArgs.includes("mcp") && mcpArgs.includes("task2"), `the conclave MCP must be wired as agent://task2:\n${JSON.stringify(mcpArgs)}`);
+
+  // --- resume relaunches remote-control from the persisted rc spec (no re-enroll).
+  await command({ op: "stop", name: "task2" });
+  await sleep(2000);
+  const mark = out.length;
+  await command({ op: "resume", name: "task2" });
+  await sleep(2000);
+  // stop deprovisioned it → resume must NOT relaunch (proves rc specs obey the same stop=forget rule).
+  assert.doesNotMatch(out.slice(mark), /launched rc task2/i, `a stopped rc node must not be resurrected:\n${out.slice(mark)}`);
 });
 
 test("e2e: the human cockpit connects SIGNED in secure mode (was rejected unsigned)", { timeout: 90_000 }, async (t) => {
