@@ -180,7 +180,7 @@ test("e2e: device agent — a commander spawns a worker over the bus; a non-comm
   await new Promise((r) => setTimeout(r, 4500));
 
   const roster = async () => (await cli(["roster", "--as", "admin", "--url", bus.WS, "--token", CT, "--http-port", bus.HP])).stdout;
-  assert.match(await roster(), /agent:\/\/dev-host/, "the device agent itself must be online");
+  assert.match(await roster(), /● agent:\/\/dev-host/, "the device agent itself must be online");
 
   // (1) a NON-commander tries to spawn → must be refused (worker-evil never appears).
   await cli(["send", "--as", "intruder", "--to", "dev-host", "--kind", "request", "--body",
@@ -193,11 +193,11 @@ test("e2e: device agent — a commander spawns a worker over the bus; a non-comm
     "--url", bus.WS, "--token", CT, "--data", bus.data("admin")]);
 
   let r = "";
-  for (let i = 0; i < 25 && !/agent:\/\/worker1/.test(r); i++) {
+  for (let i = 0; i < 25 && !/● agent:\/\/worker1/.test(r); i++) {
     await new Promise((res) => setTimeout(res, 1000));
     r = await roster();
   }
-  assert.match(r, /agent:\/\/worker1/, `the commander's spawn must bring worker1 online:\n${r}`);
+  assert.match(r, /● agent:\/\/worker1/, `the commander's spawn must bring worker1 ONLINE — invite alone already lists it (offline), so a bare name match proves nothing:\n${r}`);
   assert.doesNotMatch(r, /worker-evil/, `a non-commander's spawn must be refused (no worker-evil):\n${r}`);
 });
 
@@ -230,8 +230,8 @@ test("e2e: device agent — resume brings a persisted worker back after a host r
   await sleep(4500);
   await command({ op: "spawn", name: "task1", kind: "agent", brain: "echo", enroll: wtok });
   let r = "";
-  for (let i = 0; i < 25 && !/agent:\/\/task1/.test(r); i++) { await sleep(1000); r = await roster(); }
-  assert.match(r, /agent:\/\/task1/, `spawn must bring task1 online:\n${r}`);
+  for (let i = 0; i < 25 && !/● agent:\/\/task1/.test(r); i++) { await sleep(1000); r = await roster(); }
+  assert.match(r, /● agent:\/\/task1/, `spawn must bring task1 ONLINE (not merely enrolled):\n${r}`);
 
   // --- simulate a device restart / host crash: kill host A.
   hostA.kill();
@@ -248,8 +248,8 @@ test("e2e: device agent — resume brings a persisted worker back after a host r
   for (let i = 0; i < 20 && !/launched agent task1/i.test(hostB.out()); i++) await sleep(1000);
   assert.match(hostB.out(), /launched agent task1/i, `resume must relaunch task1 from the persisted spec (no re-enroll):\n${hostB.out()}`);
   r = "";
-  for (let i = 0; i < 25 && !/agent:\/\/task1/.test(r); i++) { await sleep(1000); r = await roster(); }
-  assert.match(r, /agent:\/\/task1/, `resumed task1 must be back online:\n${r}`);
+  for (let i = 0; i < 25 && !/● agent:\/\/task1/.test(r); i++) { await sleep(1000); r = await roster(); }
+  assert.match(r, /● agent:\/\/task1/, `resumed task1 must be back ONLINE (not merely still enrolled):\n${r}`);
 
   // --- stop = deprovision: the spec is forgotten, so a later resume must FAIL (not resurrect it).
   await command({ op: "stop", name: "task1" });
@@ -318,6 +318,51 @@ test("e2e: device agent — an rc spawn wires the conclave MCP into a pre-truste
   await sleep(2000);
   // stop deprovisioned it → resume must NOT relaunch (proves rc specs obey the same stop=forget rule).
   assert.doesNotMatch(out.slice(mark), /launched rc task2/i, `a stopped rc node must not be resurrected:\n${out.slice(mark)}`);
+});
+
+// Tree-kill: a supervisor spawns a child, and a plain kill() on Windows leaves the child alive.
+const killTree = (p: ChildProcess) => {
+  p.stdout?.destroy(); p.stderr?.destroy();
+  if (process.platform === "win32" && p.pid) { try { spawn("taskkill", ["/F", "/T", "/PID", String(p.pid)]); } catch { p.kill(); } }
+  else p.kill();
+};
+
+test("e2e: --supervise relaunches a node that exits — the gap that made self-update a no-op", { timeout: 90_000 }, async (t) => {
+  // self-update deliberately exits so a supervisor relaunches it on new code. Under nohup/tmux
+  // nothing does, so the node just dies. Here the child fails instantly (no --as) and the supervisor
+  // must keep bringing it back, backing off — proving the restart path self-update depends on.
+  const p = spawn("node", [...NODE_ARGS, "agent", "--supervise"], { stdio: ["ignore", "pipe", "pipe"] });
+  let out = "";
+  p.stdout?.on("data", (d) => (out += d.toString()));
+  p.stderr?.on("data", (d) => (out += d.toString()));
+  t.after(() => killTree(p));
+
+  const restarts = () => (out.match(/restarting in/g) ?? []).length;
+  for (let i = 0; i < 40 && restarts() < 2; i++) await new Promise((r) => setTimeout(r, 500));
+
+  assert.match(out, /supervising:/, `the supervisor must announce what it runs:\n${out}`);
+  assert.ok(restarts() >= 2, `a dead child must be relaunched repeatedly (nohup/tmux would leave it dead); saw ${restarts()}:\n${out}`);
+  assert.match(out, /restarting in 8s/, `backoff must grow on a crash loop rather than spinning hot:\n${out}`);
+});
+
+test("e2e: a --supervise'd agent actually comes online (the child runs the real command, once)", { timeout: 90_000 }, async (t) => {
+  const bus = await secureBus(t, 18);
+  await bus.enroll("sup1");
+
+  const p = spawn("node", [...NODE_ARGS, "agent", "--as", "sup1", "--brain", "echo", "--supervise", "--no-self-update",
+    "--url", bus.WS, "--token", CT, "--data", bus.data("sup1")], { stdio: ["ignore", "pipe", "pipe"] });
+  let out = "";
+  p.stdout?.on("data", (d) => (out += d.toString()));
+  p.stderr?.on("data", (d) => (out += d.toString()));
+  t.after(() => killTree(p));
+
+  const roster = async () => (await cli(["roster", "--as", "sup1", "--url", bus.WS, "--token", CT, "--http-port", bus.HP, "--data", bus.data("sup1")])).stdout;
+  let r = "";
+  for (let i = 0; i < 25 && !/● agent:\/\/sup1/.test(r); i++) { await new Promise((res) => setTimeout(res, 1000)); r = await roster(); }
+
+  assert.match(r, /● agent:\/\/sup1/, `a supervised agent must reach the bus like an unsupervised one:\n${r}\n--- supervisor output ---\n${out}`);
+  // The child must run the real command, NOT supervise again — recursion would fork-bomb the box.
+  assert.equal((out.match(/supervising:/g) ?? []).length, 1, `exactly one supervisor layer (no recursion):\n${out}`);
 });
 
 test("e2e: the human cockpit connects SIGNED in secure mode (was rejected unsigned)", { timeout: 90_000 }, async (t) => {
