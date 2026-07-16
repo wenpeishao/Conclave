@@ -34,6 +34,12 @@ export async function selfUpdateOnce(opts: SelfUpdateOpts = {}): Promise<boolean
   const git = (...args: string[]) => pexec("git", ["-C", root, ...args]);
   try {
     await git("rev-parse", "--is-inside-work-tree"); // throws if not a git checkout → no-op
+    // `npm install` rewrites package-lock.json whenever the local npm/platform disagrees with the
+    // committed lock — which makes the tree dirty, which makes the gate below refuse to update
+    // FOREVER, and silently. The install at the end of THIS function does it too, so a node could
+    // self-update once and thereby disable all its future updates. A node has no business carrying
+    // local lock edits, so drop that churn before deciding (real local changes still block).
+    await git("checkout", "--", "package-lock.json").catch(() => {});
     const { stdout: dirty } = await git("status", "--porcelain");
     if (dirty.trim()) return false; // uncommitted local changes — don't touch
     await git("fetch", "--quiet", "origin", branch);
@@ -57,6 +63,9 @@ export async function selfUpdateOnce(opts: SelfUpdateOpts = {}): Promise<boolean
       await git("reset", "--hard", "--quiet", oldHead).catch(() => {});
       throw new Error(`npm install failed; rolled back to ${oldHead.slice(0, 7)} to retry: ${(installErr as Error).message.split("\n")[0]}`);
     }
+    // The install may have rewritten the lock — undo that churn so the NEXT tick's dirty gate
+    // doesn't lock this node out of all future updates.
+    await git("checkout", "--", "package-lock.json").catch(() => {});
     log("updated — restarting to load new code");
     (opts.onUpdate ?? (() => process.exit(0)))();
     return true;

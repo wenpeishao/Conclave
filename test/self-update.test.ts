@@ -10,8 +10,10 @@ import { selfUpdateOnce } from "../src/node/self-update.js";
 /**
  * The built-in fleet self-update, exercised against REAL git repos. The promise is "a deployed node
  * keeps itself on latest with zero manual steps forever" — so the two things that would silently
- * break that get teeth here: (1) a node one commit behind actually fast-forwards + restarts, and
- * (2) a FAILED `npm install` rolls back instead of wedging the node on stale code forever.
+ * break that get teeth here: (1) a node one commit behind actually fast-forwards + restarts,
+ * (2) a FAILED `npm install` rolls back instead of wedging the node on stale code forever, and
+ * (3) package-lock churn from `npm install` does NOT gate the node out of every future update —
+ *     the failure that silently froze a real fleet, because the updater's own install caused it.
  */
 
 const pexec = promisify(execFile);
@@ -55,6 +57,36 @@ test("self-update: a node one commit behind fast-forwards and triggers restart",
   assert.equal(updated, true, "should report it updated");
   assert.equal(fired, true, "onUpdate (restart) must fire so the supervisor relaunches on new code");
   assert.notEqual(await headOf(node), commitA, "node HEAD must have advanced past A");
+});
+
+test("self-update: package-lock churn from npm install must not freeze a node forever", { timeout: 60_000 }, async (t) => {
+  const { root, node, seed, commitA } = await fixture();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  // The repo tracks a lock (conclave does) and this node has it…
+  await advance(seed, { "package-lock.json": JSON.stringify({ name: "su-fixture", lockfileVersion: 3 }) }, "add lock");
+  await gitc(node, "pull", "-q", "--ff-only", "origin", "main");
+  // …which its own `npm install` then rewrote — exactly what npm does when the local npm/platform
+  // disagrees with the committed lock. Before the fix this dirty tree silently disabled ALL updates.
+  writeFileSync(path.join(node, "package-lock.json"), JSON.stringify({ name: "su-fixture", lockfileVersion: 3, churn: true }));
+  await advance(seed, { "marker.txt": "B" }, "B");
+
+  let fired = false;
+  const updated = await selfUpdateOnce({ repoRoot: node, branch: "main", log: () => {}, onUpdate: () => { fired = true; } });
+
+  assert.equal(updated, true, "lock churn must not gate the update — it froze every node that ran npm install");
+  assert.equal(fired, true, "onUpdate (restart) must still fire");
+  assert.notEqual(await headOf(node), commitA, "node HEAD must have advanced past A");
+});
+
+test("self-update: a REAL uncommitted change still blocks the update", { timeout: 60_000 }, async (t) => {
+  const { root, node, seed } = await fixture();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  await advance(seed, { "marker.txt": "B" }, "B");
+  writeFileSync(path.join(node, "marker.txt"), "LOCAL EDIT"); // someone is debugging on this box
+
+  const updated = await selfUpdateOnce({ repoRoot: node, branch: "main", log: () => {}, onUpdate: () => {} });
+
+  assert.equal(updated, false, "the lock exemption must not become a licence to clobber real local work");
 });
 
 test("self-update: a FAILED npm install rolls back (no wedge) so a later tick retries", { timeout: 60_000 }, async (t) => {
