@@ -10,6 +10,7 @@ import { AutonomousAgent } from "./agent/runtime.js";
 import { startSelfUpdate } from "./node/self-update.js";
 import { echoBrain } from "./agent/brains/rule.js";
 import { generateIdentity, signData, type Identity } from "./core/identity.js";
+import { isSupervisedChild, runSupervised } from "./node/supervise.js";
 import type { AgentCard, Envelope } from "./core/types.js";
 
 type Args = Record<string, string | boolean>;
@@ -732,6 +733,14 @@ function help() {
           ollama     Ollama preset (:11434)  --model <name>
           lmstudio   LM Studio preset (:1234)  --model <name>
 
+  --supervise (agent|work|host|human|serve)
+        keep this node alive: run it under a built-in supervisor that relaunches it whenever
+        it exits, with backoff on a crash loop. REQUIRED for self-update to actually land on
+        a box without systemd — self-update exits so a supervisor restarts it on the new
+        code, and nohup/tmux are NOT supervisors (they survive disconnect; they do not
+        restart). Omit it under systemd, whose Restart=always already does this (both would
+        double-start). Pair with @reboot cron / systemd linger for start-at-boot.
+
   conclave mcp   --as <name> --url ws://host:8787 [--token <t>]
         run a Conclave MCP server (stdio) so a Claude Code instance becomes a bus agent —
         'claude mcp add conclave -- conclave mcp --as me --url ws://host:8787 --token <t>'.
@@ -791,6 +800,13 @@ async function main() {
   if (cmd === "help" || cmd === "--help" || cmd === "-h" || args["help"] === true || args["h"] === true) {
     help();
     return;
+  }
+  // --supervise: become a supervisor for this same command. Only the long-running node commands can
+  // be supervised — restarting a one-shot like `send` forever would be a fork bomb, not a feature.
+  if (args["supervise"] === true && !isSupervisedChild()) {
+    const SUPERVISABLE = new Set(["agent", "work", "host", "human", "serve"]);
+    if (!SUPERVISABLE.has(cmd)) throw new Error(`--supervise only applies to long-running commands (${[...SUPERVISABLE].join(", ")}), not '${cmd}'`);
+    return runSupervised();
   }
   switch (cmd) {
     case "up":
