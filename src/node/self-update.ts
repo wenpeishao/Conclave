@@ -40,8 +40,13 @@ export async function selfUpdateOnce(opts: SelfUpdateOpts = {}): Promise<boolean
     // self-update once and thereby disable all its future updates. A node has no business carrying
     // local lock edits, so drop that churn before deciding (real local changes still block).
     await git("checkout", "--", "package-lock.json").catch(() => {});
-    const { stdout: dirty } = await git("status", "--porcelain");
-    if (dirty.trim()) return false; // uncommitted local changes — don't touch
+    // `--untracked-files=no`: an untracked file must not freeze the fleet either. Operators and
+    // agents drop scratch into the checkout (a cutover script, a log, a scratch patch) and plain
+    // --porcelain counts those as dirty — same silent permanent freeze as the lock churn, for a file
+    // a fast-forward wouldn't even touch. Only TRACKED modifications are real local work worth
+    // protecting; if an untracked file would actually collide, the pull below fails loudly instead.
+    const { stdout: dirty } = await git("status", "--porcelain", "--untracked-files=no");
+    if (dirty.trim()) return false; // real uncommitted local changes — don't touch
     await git("fetch", "--quiet", "origin", branch);
     const [{ stdout: head }, { stdout: remote }] = await Promise.all([
       git("rev-parse", "HEAD"),

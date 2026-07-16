@@ -78,6 +78,22 @@ test("self-update: package-lock churn from npm install must not freeze a node fo
   assert.notEqual(await headOf(node), commitA, "node HEAD must have advanced past A");
 });
 
+test("self-update: an untracked scratch file must not freeze a node either", { timeout: 60_000 }, async (t) => {
+  const { root, node, seed, commitA } = await fixture();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  await advance(seed, { "marker.txt": "B" }, "B");
+  // An operator/agent dropped a script or log in the checkout. A fast-forward wouldn't touch it, but
+  // plain `git status --porcelain` calls it dirty — silently freezing this node's updates forever.
+  writeFileSync(path.join(node, "cutover-supervise.sh"), "#!/bin/bash\necho scratch\n");
+
+  let fired = false;
+  const updated = await selfUpdateOnce({ repoRoot: node, branch: "main", log: () => {}, onUpdate: () => { fired = true; } });
+
+  assert.equal(updated, true, "an untracked scratch file must not gate the update");
+  assert.equal(fired, true, "onUpdate (restart) must still fire");
+  assert.notEqual(await headOf(node), commitA, "node HEAD must have advanced past A");
+});
+
 test("self-update: a REAL uncommitted change still blocks the update", { timeout: 60_000 }, async (t) => {
   const { root, node, seed } = await fixture();
   t.after(() => rmSync(root, { recursive: true, force: true }));
